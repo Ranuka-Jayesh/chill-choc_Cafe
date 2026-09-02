@@ -76,6 +76,11 @@ export interface CashDrawerTransaction {
   reason?: string;
   expenseCategory?: string;
   timestamp: string;
+  status?: 'APPROVED' | 'PENDING_APPROVAL' | 'REJECTED';
+  approvedByUserId?: string;
+  approvedByUserName?: string;
+  approvedAt?: string;
+  rejectedReason?: string;
 }
 
 export interface PreparationStation {
@@ -191,6 +196,7 @@ export type OrderStatus =
   | 'READY'
   | 'COMPLETED'
   | 'CANCELLED'
+  | 'REFUND_PENDING'
   | 'REFUNDED'
   | 'PARTIALLY_REFUNDED';
 
@@ -238,8 +244,12 @@ export interface Order {
   terminalId: string;
   orderType: OrderType;
   tableNumber?: string;
+  customerId?: string;
   customerName?: string;
   customerPhone?: string;
+  loyaltyPointsEarned?: number;
+  loyaltyPointsRedeemed?: number;
+  loyaltyDiscountCents?: number;
   status: OrderStatus;
   items: OrderItem[];
   subtotalCents: number;
@@ -262,6 +272,26 @@ export interface Order {
   completedAt?: string;
   refundedAmountCents?: number;
   refundReason?: string;
+  refundStatus?: 'NONE' | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+  refundRequest?: {
+    requestedByUserId: string;
+    requestedByUserName: string;
+    requestedAt: string;
+    reason: string;
+    amountCents: number;
+  };
+  refundApproval?: {
+    approvedByUserId: string;
+    approvedByUserName: string;
+    approvedAt: string;
+    notes?: string;
+  };
+  refundRejection?: {
+    rejectedByUserId: string;
+    rejectedByUserName: string;
+    rejectedAt: string;
+    rejectionReason?: string;
+  };
 }
 
 export interface HeldOrder {
@@ -369,6 +399,138 @@ export interface Expense {
 export type EmployeePayFrequency = 'MONTHLY' | 'WEEKLY' | 'HOURLY';
 export type EmployeePaymentType = 'SALARY' | 'ADVANCE' | 'BONUS' | 'OVERTIME';
 
+export type RateChangeType = 'OVERTIME' | 'LEAVE' | 'BASE_SALARY' | 'STANDARD_HOURS' | 'ALL';
+
+export interface EmployeeRateHistory {
+  id: string;
+  employeeId?: string; // 'GLOBAL' or employee ID (e.g. 'emp_001')
+  employeeName: string; // 'Global Default (All Staff)' or employee name
+  rateType: RateChangeType;
+  previousOvertimeRateCents?: number;
+  newOvertimeRateCents?: number;
+  previousLeaveRateCents?: number;
+  newLeaveRateCents?: number;
+  previousBaseSalaryCents?: number;
+  newBaseSalaryCents?: number;
+  previousStandardHoursPerDay?: number;
+  newStandardHoursPerDay?: number;
+  changedBy: string; // e.g. 'Admin (usr_admin)'
+  reason?: string; // e.g. 'Annual inflation adjustment', 'Promotion', 'Overtime incentive boost'
+  effectiveDate: string; // e.g. '2026-09-01'
+  createdAt: string;
+}
+
+export type LoyaltyHistoryChangeType =
+  | 'ALL'
+  | 'PROGRAM_CONFIG'
+  | 'EARNING_RATE'
+  | 'REDEMPTION_VALUE'
+  | 'BONUS_RULES'
+  | 'VALIDITY_LIMITS';
+
+export interface LoyaltySettingHistory {
+  id: string;
+  changeType: LoyaltyHistoryChangeType;
+  title: string;
+  summary: string;
+  previousSpendPerPointCents?: number;
+  newSpendPerPointCents?: number;
+  previousRedemptionValueCents?: number;
+  newRedemptionValueCents?: number;
+  previousMinSpendToEarnCents?: number;
+  newMinSpendToEarnCents?: number;
+  previousMinPointsToRedeem?: number;
+  newMinPointsToRedeem?: number;
+  previousMaxRedemptionPercent?: number;
+  newMaxRedemptionPercent?: number;
+  previousSignupBonusPoints?: number;
+  newSignupBonusPoints?: number;
+  previousBirthdayBonusPoints?: number;
+  newBirthdayBonusPoints?: number;
+  previousPointsExpiryDays?: number;
+  newPointsExpiryDays?: number;
+  previousProgramName?: string;
+  newProgramName?: string;
+  previousProgramEnabled?: boolean;
+  newProgramEnabled?: boolean;
+  changedBy: string; // e.g. 'Admin (Chaminda Silva)'
+  reason?: string;
+  createdAt: string;
+}
+
+export type CustomerTier = 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM';
+
+export interface CustomerPointHistory {
+  id: string;
+  customerId: string;
+  type: 'EARNED' | 'REDEEMED' | 'SIGNUP_BONUS' | 'BIRTHDAY_BONUS' | 'MANUAL_ADJUST';
+  points: number;
+  balanceAfter: number;
+  orderId?: string;
+  orderNumber?: string;
+  amountCents?: number;
+  note?: string;
+  createdAt: string;
+}
+
+export interface Customer {
+  id: string;
+  customerId: string; // e.g. "CUST-1001"
+  name: string;
+  phone: string;
+  email?: string;
+  address?: string;
+  birthday?: string;
+  tier: CustomerTier;
+  points: number;
+  totalSpentCents: number;
+  totalOrders: number;
+  lastVisit: string;
+  notes?: string;
+  createdAt: string;
+  pointHistory?: CustomerPointHistory[];
+}
+
+export type AttendanceDayStatus = 'PRESENT' | 'OVERTIME' | 'ABSENT' | 'HOLIDAY' | 'LATE' | 'EARLY_LEAVE';
+
+export interface EmployeeAttendanceDay {
+  status: AttendanceDayStatus;
+  standardShiftHours?: number;
+  overtimeHours?: number;
+  checkInTime?: string;
+  checkOutTime?: string;
+  checkInSignature?: string; // Base64 / SVG signature data URL
+  checkOutSignature?: string; // Base64 / SVG signature data URL
+  workedHours?: number;
+  earlyLeaveHours?: number;
+  isLate?: boolean;
+  lateMinutes?: number;
+  isEarlyLeave?: boolean;
+  earlyMinutes?: number;
+  notes?: string;
+}
+
+export interface EmployeeAttendanceDetailRow {
+  date: string;
+  dayOfWeek: string;
+  formattedDate: string;
+  status: AttendanceDayStatus;
+  checkInTime: string;
+  checkOutTime: string;
+  checkInSignature?: string;
+  checkOutSignature?: string;
+  standardShiftHours: number;
+  workedHours: number;
+  overtimeHours: number;
+  earlyLeaveHours: number;
+  varianceHours: number;
+  isLate?: boolean;
+  lateMinutes?: number;
+  isEarlyLeave?: boolean;
+  earlyMinutes?: number;
+  notes?: string;
+}
+
 export interface Employee {
   id: string;
   name: string;
@@ -380,6 +542,13 @@ export interface Employee {
   emergencyContact?: string;
   baseSalaryCents: number;
   payFrequency: EmployeePayFrequency;
+  overtimeHourlyRateCents?: number; // Custom hourly overtime rate (in cents). If not set, falls back to default in SystemSettings
+  leaveDailyRateCents?: number; // Custom daily leave deduction rate (in cents). If not set, falls back to default in SystemSettings
+  standardHoursPerDay?: number;
+  shiftStartTime?: string; // e.g. "08:30" (24h format)
+  shiftEndTime?: string; // e.g. "17:30" (24h format)
+  attendedDays?: number; // Total count of attended working days for current period
+  attendanceRecords?: Record<string, EmployeeAttendanceDay>; // e.g. { '2026-09-01': { status: 'PRESENT' } }
   salaryPayDay?: number | string;
   salaryDate?: string;
   joinDate?: string;
@@ -399,6 +568,13 @@ export interface EmployeePayment {
   paymentType: EmployeePaymentType;
   method: 'CASH' | 'CARD' | 'CHEQUE';
   date: string;
+  baseSalaryAmountCents?: number;
+  overtimeAmountCents?: number;
+  overtimeHours?: number;
+  bonusAmountCents?: number;
+  bonusReason?: string;
+  deductionAmountCents?: number;
+  deductionReason?: string;
   chequeNumber?: string;
   bankName?: string;
   chequeDate?: string;
@@ -547,6 +723,31 @@ export interface ReceiptCustomizationSettings {
   developerContact: string;
 }
 
+export interface KotCustomizationSettings {
+  ticketTitle: string; // e.g. 'KITCHEN ORDER TICKET'
+  showBrandName: boolean;
+  brandName: string; // e.g. 'CHILL & CHOC'
+  showOrderType: boolean;
+  showTableNumber: boolean;
+  tableNumberStyle: 'prominent' | 'standard'; // prominent = large box, standard = inline
+  showOrderNumber: boolean;
+  orderNumberPrefix: string; // e.g. '#'
+  showCashierName: boolean;
+  cashierLabel: string; // e.g. 'Staff:' / 'Server:'
+  showCustomerName?: boolean;
+  showDateTime: boolean;
+  timeFormat: '12h' | '24h';
+  showModifiers: boolean;
+  showItemNotes: boolean;
+  highlightNotes: boolean; // colored alert box for notes
+  fontSize: 'compact' | 'normal' | 'large';
+  paperWidthMm: 58 | 80;
+  dividerStyle: 'dashed' | 'double' | 'dotted' | 'solid';
+  showStationRouting: boolean;
+  stationRoutingText: string; // e.g. 'Station Routing: BAR / KITCHEN / DESSERT'
+  customNote?: string;
+}
+
 export interface SystemSettings {
   businessName: string;
   tagline: string;
@@ -564,6 +765,18 @@ export interface SystemSettings {
   autoPrintKOT: boolean;
   receiptCopies: number;
   receiptCustomization?: ReceiptCustomizationSettings;
+  kotCustomization?: KotCustomizationSettings;
+  // Employee & Payroll Rate Defaults
+  defaultOvertimeHourlyRateCents: number; // e.g. 45000 = Rs. 450.00 / hour
+  defaultLeaveDailyRateCents: number; // e.g. 250000 = Rs. 2,500.00 / day
+  overtimeCalculationMode?: 'FIXED_HOURLY' | 'SALARY_MULTIPLIER';
+  overtimeMultiplier?: number; // e.g. 1.5x
+  standardWorkHoursPerDay?: number; // default 8
+  workingDaysPerMonth?: number; // default 26
+  shiftStartTime?: string; // default "08:30" (24h format)
+  shiftEndTime?: string; // default "17:30" (24h format)
+  lateGraceMinutes?: number; // default 15 mins
+  leavePolicyNote?: string;
   // Cash Drawer Rules
   requireOpeningCash: boolean;
   blindShiftClose: boolean;
@@ -573,4 +786,55 @@ export interface SystemSettings {
   allowCashierManualCashOut: boolean;
   openDrawerAfterCashSale: boolean;
   defaultTerminalId: string;
+  // Customer Loyalty & Rewards Program Settings
+  loyaltyProgramEnabled: boolean;
+  loyaltyProgramName: string; // e.g. 'Chill Club Rewards'
+  loyaltySpendPerPointCents: number; // e.g. 10000 = Rs. 100.00 spent gives 1 point
+  loyaltyMinSpendToEarnCents: number; // e.g. 20000 = Min bill of Rs. 200.00 to qualify
+  loyaltyPointRedemptionValueCents: number; // e.g. 100 = 1 point = Rs. 1.00 discount
+  loyaltyMinPointsToRedeem: number; // e.g. 50 points threshold to unlock redemption
+  loyaltyMaxRedemptionPercentPerOrder: number; // e.g. 50% of invoice total max payable via points
+  loyaltySignupBonusPoints: number; // e.g. 25 welcome bonus points on member signup
+  loyaltyBirthdayBonusPoints: number; // e.g. 50 birthday bonus points
+  loyaltyPointsExpiryDays: number; // e.g. 365 days (0 = never expires)
 }
+
+export type StockRequestType = 'STOCK_ADJUSTMENT' | 'STOCK_DELIVERY';
+export type StockRequestStatus = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+
+export interface StockRequest {
+  id: string;
+  requestNumber: string; // e.g. "REQ-1001"
+  type: StockRequestType;
+  ingredientId?: string;
+  ingredientName: string;
+  sku?: string;
+  currentStock: number;
+  requestedStock?: number; // for adjustment (the proposed total quantity)
+  quantityChange: number; // diff or added quantity (+10, -2, etc.)
+  unit: string;
+  costCents?: number;
+  supplierId?: string;
+  supplierName?: string;
+  invoiceNumber?: string;
+  expiryDate?: string;
+  reason: string;
+  requestedByUserId: string;
+  requestedByUserName: string;
+  status: StockRequestStatus;
+  createdAt: string;
+  resolvedAt?: string;
+  resolvedByUserId?: string;
+  resolvedByUserName?: string;
+  rejectionReason?: string;
+  // Multi-item delivery request details
+  items?: PurchaseItem[];
+  totalCents?: number;
+  paidCents?: number;
+  dueCents?: number;
+  paymentStatus?: PurchasePaymentStatus;
+  payments?: PurchasePaymentSplit[];
+  duePaymentDate?: string;
+  notes?: string;
+}
+

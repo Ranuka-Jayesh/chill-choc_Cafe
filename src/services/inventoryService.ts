@@ -8,8 +8,10 @@ import {
   PurchaseItem,
   PurchasePaymentSplit,
   PurchasePaymentStatus,
+  StockRequest,
 } from '@/types';
 import { realtimeSocketService } from './realtimeSocketService';
+import { cashDrawerService } from './cashDrawerService';
 
 export const inventoryService = {
   getIngredients: (): Ingredient[] => {
@@ -448,4 +450,252 @@ export const inventoryService = {
     );
     return updatedPO;
   },
+
+  getStockRequests: (): StockRequest[] => {
+    return db.getSnapshot().stockRequests || [];
+  },
+
+  requestStockAdjustment: (data: {
+    ingredientId: string;
+    ingredientName: string;
+    currentStock: number;
+    requestedStock: number;
+    unit: string;
+    reason: string;
+    userId: string;
+    userName: string;
+  }): StockRequest => {
+    const diff = Number((data.requestedStock - data.currentStock).toFixed(3));
+    const request: StockRequest = {
+      id: `stk_req_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      requestNumber: `STK-ADJ-${Date.now().toString().slice(-4)}`,
+      type: 'STOCK_ADJUSTMENT',
+      ingredientId: data.ingredientId,
+      ingredientName: data.ingredientName,
+      currentStock: data.currentStock,
+      requestedStock: data.requestedStock,
+      quantityChange: diff,
+      unit: data.unit,
+      reason: data.reason.trim() || 'Inventory physical count audit discrepancy',
+      requestedByUserId: data.userId,
+      requestedByUserName: data.userName,
+      status: 'PENDING_APPROVAL',
+      createdAt: new Date().toISOString(),
+    };
+
+    db.update('stockRequests', (list) => [request, ...(list || [])]);
+    realtimeSocketService.emitStockRequestPending(request);
+    return request;
+  },
+
+  requestStockDelivery: (data: {
+    ingredientId?: string;
+    ingredientName?: string;
+    sku?: string;
+    quantity?: number;
+    unit?: string;
+    costCents?: number;
+    supplierId?: string;
+    supplierName?: string;
+    invoiceNumber?: string;
+    expiryDate?: string;
+    reason?: string;
+    userId: string;
+    userName: string;
+    // Full purchase intake data
+    items?: PurchaseItem[];
+    totalCents?: number;
+    paidCents?: number;
+    dueCents?: number;
+    paymentStatus?: PurchasePaymentStatus;
+    payments?: PurchasePaymentSplit[];
+    duePaymentDate?: string;
+    notes?: string;
+  }): StockRequest => {
+    const items = data.items || [];
+    const firstItem = items[0];
+    const totalQty = items.length > 0 ? items.reduce((sum, item) => sum + item.quantity, 0) : (data.quantity || 1);
+    const resolvedTotalCost = data.totalCents ?? data.costCents ?? (items.reduce((sum, item) => sum + item.totalCents, 0));
+
+    const ingredientName = items.length > 1
+      ? `${items.length} items (${firstItem?.ingredientName || ''}, ...)`
+      : firstItem?.ingredientName || data.ingredientName || 'Delivery Goods';
+
+    const existingIng = firstItem?.ingredientId
+      ? db.getSnapshot().ingredients.find((i) => i.id === firstItem.ingredientId)
+      : data.ingredientId
+      ? db.getSnapshot().ingredients.find((i) => i.id === data.ingredientId)
+      : undefined;
+
+    const request: StockRequest = {
+      id: `stk_req_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      requestNumber: `STK-RCV-${Date.now().toString().slice(-4)}`,
+      type: 'STOCK_DELIVERY',
+      ingredientId: existingIng?.id || firstItem?.ingredientId || data.ingredientId,
+      ingredientName,
+      sku: existingIng?.sku || data.sku,
+      currentStock: existingIng ? existingIng.currentStock : 0,
+      quantityChange: Number(totalQty.toFixed(3)),
+      unit: firstItem?.unit || data.unit || 'units',
+      costCents: resolvedTotalCost,
+      totalCents: resolvedTotalCost,
+      paidCents: data.paidCents,
+      dueCents: data.dueCents,
+      paymentStatus: data.paymentStatus,
+      payments: data.payments,
+      duePaymentDate: data.duePaymentDate,
+      notes: data.notes,
+      items: data.items,
+      supplierId: data.supplierId,
+      supplierName: data.supplierName?.trim() || 'Direct Supplier Delivery',
+      invoiceNumber: data.invoiceNumber?.trim() || `INV-${Date.now().toString().slice(-4)}`,
+      expiryDate: firstItem?.expiryDate || data.expiryDate,
+      reason: data.reason?.trim() || `Goods Delivery Received (${items.length > 0 ? `${items.length} lines` : ingredientName})`,
+      requestedByUserId: data.userId,
+      requestedByUserName: data.userName,
+      status: 'PENDING_APPROVAL',
+      createdAt: new Date().toISOString(),
+    };
+
+    db.update('stockRequests', (list) => [request, ...(list || [])]);
+    realtimeSocketService.emitStockRequestPending(request);
+    return request;
+  },
+
+  approveStockRequest: (params: {
+    requestId: string;
+    adminId: string;
+    adminName: string;
+    modifiedQty?: number;
+    modifiedCost?: number;
+    modifiedExpiry?: string;
+  }): StockRequest | null => {
+    const requests = db.getSnapshot().stockRequests || [];
+    const req = requests.find((r) => r.id === params.requestId);
+    if (!req || req.status !== 'PENDING_APPROVAL') return null;
+
+    const finalQty = params.modifiedQty !== undefined ? params.modifiedQty : (req.type === 'STOCK_ADJUSTMENT' ? req.requestedStock ?? (req.currentStock + req.quantityChange) : req.quantityChange);
+    const finalCost = params.modifiedCost !== undefined ? params.modifiedCost : req.costCents;
+    const finalExpiry = params.modifiedExpiry || req.expiryDate;
+
+    // Apply the actual changes to inventory
+    if (req.type === 'STOCK_ADJUSTMENT' && req.ingredientId) {
+      inventoryService.adjustStock({
+        ingredientId: req.ingredientId,
+        newStock: finalQty,
+        reason: `[Approved Staff Request] ${req.reason} (Submitted by ${req.requestedByUserName}, approved by ${params.adminName})`,
+        userId: params.adminId,
+        userName: params.adminName,
+      });
+    } else if (req.type === 'STOCK_DELIVERY') {
+      const items: PurchaseItem[] = req.items && req.items.length > 0
+        ? req.items
+        : [
+            {
+              ingredientId: req.ingredientId || `ing_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+              ingredientName: req.ingredientName,
+              quantity: finalQty,
+              unit: req.unit as any,
+              unitPriceCents: finalCost ? Math.round(finalCost / (finalQty || 1)) : 0,
+              totalCents: finalCost || 0,
+              expiryDate: finalExpiry,
+            },
+          ];
+
+      inventoryService.recordPurchase({
+        supplierId: req.supplierId,
+        supplierName: req.supplierName || 'Direct Supplier Delivery',
+        invoiceNumber: req.invoiceNumber || `INV-${Date.now().toString().slice(-4)}`,
+        items,
+        totalCents: req.totalCents ?? (finalCost || 0),
+        paidCents: req.paidCents,
+        dueCents: req.dueCents,
+        paymentStatus: req.paymentStatus,
+        payments: req.payments,
+        dueDate: req.duePaymentDate,
+        notes: req.notes || `Cashier Delivery Receipt submitted by ${req.requestedByUserName} (Authorized by ${params.adminName}) - ${req.reason}`,
+      });
+
+      // Automatically deduct cash from cashier's cash drawer if cash payment was made
+      let cashPaidCents = 0;
+      if (req.payments && req.payments.length > 0) {
+        cashPaidCents = req.payments
+          .filter((p) => p.method === 'CASH')
+          .reduce((sum, p) => sum + p.amountCents, 0);
+      } else if (req.paymentStatus === 'PAID') {
+        cashPaidCents = req.paidCents || req.totalCents || finalCost || 0;
+      }
+
+      if (cashPaidCents > 0) {
+        const snapshot = db.getSnapshot();
+        const allShifts = snapshot.shifts || [];
+        const targetShift =
+          allShifts.find((s) => s.cashierId === req.requestedByUserId && s.status === 'OPEN') ||
+          snapshot.activeShift ||
+          allShifts.find((s) => s.status === 'OPEN');
+
+        if (targetShift) {
+          cashDrawerService.addTransaction({
+            shiftId: targetShift.id,
+            terminalId: targetShift.terminalId || 'term_main',
+            cashierId: req.requestedByUserId || targetShift.cashierId,
+            cashierName: req.requestedByUserName || targetShift.cashierName,
+            type: 'CASH_OUT',
+            amount: -cashPaidCents,
+            orderNumber: req.invoiceNumber ? `PO (${req.invoiceNumber})` : req.requestNumber,
+            reason: `[Cash Paid Intake] Supplier: ${req.supplierName || 'General Supplier'} • ${req.ingredientName || 'Ingredients'} (${req.requestNumber})`,
+            expenseCategory: 'Inventory / Stock Intake',
+            status: 'APPROVED',
+          });
+        }
+      }
+    }
+
+    const updatedReq: StockRequest = {
+      ...req,
+      status: 'APPROVED',
+      resolvedAt: new Date().toISOString(),
+      resolvedByUserId: params.adminId,
+      resolvedByUserName: params.adminName,
+      requestedStock: req.type === 'STOCK_ADJUSTMENT' ? finalQty : undefined,
+      quantityChange: req.type === 'STOCK_DELIVERY' ? finalQty : Number((finalQty - req.currentStock).toFixed(3)),
+      costCents: finalCost,
+      expiryDate: finalExpiry,
+    };
+
+    db.update('stockRequests', (list) =>
+      (list || []).map((r) => (r.id === params.requestId ? updatedReq : r))
+    );
+
+    realtimeSocketService.emitStockRequestApproved(updatedReq);
+    return updatedReq;
+  },
+
+  rejectStockRequest: (params: {
+    requestId: string;
+    adminId: string;
+    adminName: string;
+    reason: string;
+  }): StockRequest | null => {
+    const requests = db.getSnapshot().stockRequests || [];
+    const req = requests.find((r) => r.id === params.requestId);
+    if (!req || req.status !== 'PENDING_APPROVAL') return null;
+
+    const updatedReq: StockRequest = {
+      ...req,
+      status: 'REJECTED',
+      rejectionReason: params.reason || 'Rejected by Administrator',
+      resolvedAt: new Date().toISOString(),
+      resolvedByUserId: params.adminId,
+      resolvedByUserName: params.adminName,
+    };
+
+    db.update('stockRequests', (list) =>
+      (list || []).map((r) => (r.id === params.requestId ? updatedReq : r))
+    );
+
+    realtimeSocketService.emitStockRequestRejected(updatedReq);
+    return updatedReq;
+  },
 };
+

@@ -5,13 +5,21 @@ export type RealtimeSocketStatus = 'CONNECTED' | 'CONNECTING' | 'DISCONNECTED';
 export type RealtimeEventType =
   | 'ORDER_CREATED'
   | 'ORDER_UPDATED'
+  | 'ORDER_REFUND_REQUESTED'
   | 'ORDER_REFUNDED'
+  | 'ORDER_REFUND_REJECTED'
   | 'ORDER_HELD'
   | 'ORDER_RESUMED'
   | 'CATALOG_CHANGED'
   | 'STOCK_CHANGED'
   | 'SHIFT_CHANGED'
   | 'DRAWER_TRANSACTION'
+  | 'DRAWER_REQUEST_PENDING'
+  | 'DRAWER_REQUEST_APPROVED'
+  | 'DRAWER_REQUEST_REJECTED'
+  | 'STOCK_REQUEST_PENDING'
+  | 'STOCK_REQUEST_APPROVED'
+  | 'STOCK_REQUEST_REJECTED'
   | 'SETTINGS_CHANGED'
   | 'RECEIPT_TEMPLATE_CHANGED'
   | 'STAFF_CHANGED'
@@ -187,8 +195,16 @@ class RealtimeSocketService {
     this.broadcast('ORDER_UPDATED', { order });
   }
 
+  public emitOrderRefundRequested(order: Order): void {
+    this.broadcast('ORDER_REFUND_REQUESTED', { order });
+  }
+
   public emitOrderRefunded(order: Order): void {
     this.broadcast('ORDER_REFUNDED', { order });
+  }
+
+  public emitOrderRefundRejected(order: Order): void {
+    this.broadcast('ORDER_REFUND_REJECTED', { order });
   }
 
   public emitOrderHeld(heldOrder: HeldOrder): void {
@@ -209,6 +225,36 @@ class RealtimeSocketService {
 
   public emitDrawerTransaction(transaction: CashDrawerTransaction): void {
     this.broadcast('DRAWER_TRANSACTION', { transaction });
+  }
+
+  public emitDrawerRequestPending(transaction: CashDrawerTransaction): void {
+    this.broadcast('DRAWER_REQUEST_PENDING', { transaction });
+    this.broadcast('DRAWER_TRANSACTION', { transaction });
+  }
+
+  public emitDrawerRequestApproved(transaction: CashDrawerTransaction): void {
+    this.broadcast('DRAWER_REQUEST_APPROVED', { transaction });
+    this.broadcast('DRAWER_TRANSACTION', { transaction });
+  }
+
+  public emitDrawerRequestRejected(transaction: CashDrawerTransaction): void {
+    this.broadcast('DRAWER_REQUEST_REJECTED', { transaction });
+    this.broadcast('DRAWER_TRANSACTION', { transaction });
+  }
+
+  public emitStockRequestPending(stockRequest: any): void {
+    this.broadcast('STOCK_REQUEST_PENDING', { stockRequest });
+    this.broadcast('STOCK_CHANGED', { stockRequest });
+  }
+
+  public emitStockRequestApproved(stockRequest: any): void {
+    this.broadcast('STOCK_REQUEST_APPROVED', { stockRequest });
+    this.broadcast('STOCK_CHANGED', { stockRequest });
+  }
+
+  public emitStockRequestRejected(stockRequest: any): void {
+    this.broadcast('STOCK_REQUEST_REJECTED', { stockRequest });
+    this.broadcast('STOCK_CHANGED', { stockRequest });
   }
 
   public emitSettingsChanged(settings: SystemSettings): void {

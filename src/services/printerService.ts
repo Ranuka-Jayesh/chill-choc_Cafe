@@ -223,8 +223,13 @@ export const printerService = {
 
     lines.push('--------------------------------');
     lines.push(`Subtotal:              ${formatLKR(order.subtotalCents)}`);
-    if (order.discountCents > 0) {
-      lines.push(`Discount:             -${formatLKR(order.discountCents)}`);
+    const loyaltyDisc = order.loyaltyDiscountCents || 0;
+    const manualDisc = Math.max(0, (order.discountCents || 0) - loyaltyDisc);
+    if (manualDisc > 0) {
+      lines.push(`Discount:             -${formatLKR(manualDisc)}`);
+    }
+    if (loyaltyDisc > 0) {
+      lines.push(`Loyalty Discount:     -${formatLKR(loyaltyDisc)}`);
     }
     if (order.serviceChargeCents > 0) {
       lines.push(`Service Charge:        ${formatLKR(order.serviceChargeCents)}`);
@@ -257,6 +262,24 @@ export const printerService = {
       order.paymentSplits.forEach((sp) => {
         lines.push(` * ${sp.method}: ${formatLKR(sp.amountCents)}`);
       });
+    }
+
+    if (order.customerName) {
+      lines.push('--------------------------------');
+      lines.push(`CUSTOMER: ${order.customerName}`);
+      const cust = order.customerId
+        ? db.getSnapshot().customers.find((c) => c.id === order.customerId)
+        : order.customerPhone
+        ? db.getSnapshot().customers.find((c) => c.phone === order.customerPhone)
+        : null;
+
+      if (order.loyaltyPointsRedeemed && order.loyaltyPointsRedeemed > 0) {
+        lines.push(`Redeemed: -${order.loyaltyPointsRedeemed} Pts${cust ? ` | Total Points: ${cust.points} Pts` : ''}`);
+      } else if (order.loyaltyPointsEarned && order.loyaltyPointsEarned > 0) {
+        lines.push(`Earned: +${order.loyaltyPointsEarned} Pts${cust ? ` | Total Points: ${cust.points} Pts` : ''}`);
+      } else if (cust) {
+        lines.push(`Total Points: ${cust.points} Pts`);
+      }
     }
 
     lines.push('--------------------------------');

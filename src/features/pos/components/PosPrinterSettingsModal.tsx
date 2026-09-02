@@ -2,11 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { printerService, PrintResult } from '@/services/printerService';
 import { settingsService } from '@/services/settingsService';
-import { PrinterConfig, PrinterJob, SystemSettings, PreparationStation } from '@/types';
+import { PrinterConfig, PrinterJob, SystemSettings, PreparationStation, Order } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatDateTime } from '@/utils/format';
 import { CustomSelect } from '@/components/ui/CustomSelect';
+import { CustomDatePicker } from '@/components/ui/CustomDatePicker';
 import { confirmDialog } from '@/store/useConfirmStore';
+import { ThermalReceiptModal } from '@/components/brand/ThermalReceiptModal';
+import { KOTPreviewModal } from '@/components/brand/KOTPreviewModal';
 import {
   Printer,
   Wifi,
@@ -29,8 +32,11 @@ import {
   Scissors,
   Volume2,
   Layers,
+  Calendar,
 } from 'lucide-react';
 import { toast } from 'sonner';
+
+const getTodayDateStr = () => new Date().toISOString().slice(0, 10);
 
 interface PosPrinterSettingsModalProps {
   isOpen: boolean;
@@ -49,7 +55,34 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
 
   const [editingPrinter, setEditingPrinter] = useState<Partial<PrinterConfig> | null>(null);
   const [viewingTestJob, setViewingTestJob] = useState<PrinterJob | null>(null);
+  const [viewingReceiptOrder, setViewingReceiptOrder] = useState<Order | null>(null);
+  const [viewingKOTOrder, setViewingKOTOrder] = useState<Order | null>(null);
   const [filterJobStatus, setFilterJobStatus] = useState('ALL');
+  const [filterDate, setFilterDate] = useState<string>(getTodayDateStr);
+
+  const handleViewSlip = (job: PrinterJob) => {
+    const orders = db.getSnapshot().orders;
+    const numToFind = (job.orderNumber || '').replace(/^#/, '');
+    const foundOrder = orders.find(
+      (o) =>
+        o.id === job.orderId ||
+        o.orderNumber === job.orderNumber ||
+        o.orderNumber === numToFind ||
+        `#${o.orderNumber}` === job.orderNumber
+    );
+
+    if (job.type === 'CUSTOMER_RECEIPT' && foundOrder) {
+      setViewingReceiptOrder(foundOrder);
+      return;
+    }
+
+    if (job.type === 'KOT' && foundOrder) {
+      setViewingKOTOrder(foundOrder);
+      return;
+    }
+
+    setViewingTestJob(job);
+  };
 
   useEffect(() => {
     const unsub = db.subscribe(() => {
@@ -139,6 +172,10 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
 
   const filteredJobs = jobs.filter((j) => {
     if (filterJobStatus !== 'ALL' && j.status !== filterJobStatus) return false;
+    if (filterDate) {
+      const jobDate = j.createdAt ? j.createdAt.slice(0, 10) : '';
+      if (jobDate !== filterDate) return false;
+    }
     return true;
   });
 
@@ -224,14 +261,20 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
         </div>
 
         {/* Scrollable Tab Body */}
-        <div className="flex-1 overflow-y-auto p-5 sm:p-8 space-y-6">
+        <div
+          className={`flex-1 ${
+            activeTab === 'QUEUE'
+              ? 'overflow-hidden flex flex-col p-4 sm:p-6'
+              : 'overflow-y-auto p-5 sm:p-8 space-y-6'
+          }`}
+        >
           {/* TAB 1: PRINTERS LIST */}
           {activeTab === 'PRINTERS' && (
             <div className="space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h4 className="font-extrabold text-sm sm:text-base text-brand-brown-dark">
-                    Connected Receipt & Prep Printers
+                    Connected Receipt &amp; Prep Printers
                   </h4>
                   <p className="text-xs text-text-secondary">
                     Manage ESC/POS printer routing, test diagnostic prints, and cash drawer solenoid
@@ -241,7 +284,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                 <div className="flex items-center gap-2.5 self-start sm:self-auto">
                   <button
                     onClick={handleTestDrawerKick}
-                    className="flex items-center gap-1.5 px-3.5 py-2.5 bg-brand-yellow-light hover:bg-brand-yellow/30 text-amber-900 border border-brand-yellow/50 rounded-xl font-extrabold text-xs shadow-sm transition-all active:scale-95"
+                    className="flex items-center gap-1.5 px-3.5 py-2.5 bg-brand-yellow-light hover:bg-brand-yellow/30 text-amber-900 border border-brand-yellow/50 rounded-xl font-extrabold text-xs shadow-sm transition-all active:scale-95 cursor-pointer"
                   >
                     <Coins className="w-4 h-4 text-brand-orange" />
                     Test Drawer Kick
@@ -263,7 +306,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                         isDefaultReceipt: false,
                       })
                     }
-                    className="flex items-center gap-1.5 px-4 py-2.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-black text-xs shadow-teal transition-all active:scale-95"
+                    className="flex items-center gap-1.5 px-4 py-2.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-black text-xs shadow-teal transition-all active:scale-95 cursor-pointer"
                   >
                     <Plus className="w-4 h-4 stroke-[2.5]" />
                     Add Printer
@@ -282,7 +325,6 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                       : printer.connectionType === 'BLUETOOTH'
                       ? Bluetooth
                       : Monitor;
-
                   return (
                     <div
                       key={printer.id}
@@ -302,7 +344,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                                 </h5>
                                 {printer.isDefaultReceipt && (
                                   <span className="px-2 py-0.5 rounded-full bg-brand-teal-light text-brand-teal font-extrabold text-[10px] uppercase">
-                                    Default
+                                    Default Receipt
                                   </span>
                                 )}
                               </div>
@@ -313,7 +355,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                           {/* Online Toggle Pill */}
                           <button
                             onClick={() => handleToggleOnline(printer.id)}
-                            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold transition-all ${
+                            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold transition-all cursor-pointer ${
                               printer.isOnline
                                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                                 : 'bg-rose-50 text-rose-700 border border-rose-200'
@@ -351,31 +393,35 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                         </div>
                       </div>
 
-                      {/* Action Bar */}
-                      <div className="pt-3 border-t border-cream-100 flex items-center gap-2">
-                        <button
-                          onClick={() => handleTestPrint(printer)}
-                          className="flex-1 flex items-center justify-center gap-2 py-2.5 px-4 bg-cream-100 hover:bg-brand-teal hover:text-white rounded-xl text-brand-brown-dark font-extrabold text-xs transition-all active:scale-95 shadow-xs"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          Test Print
-                        </button>
+                      {/* Action buttons */}
+                      <div className="flex items-center justify-between pt-3 border-t border-border/70">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleTestPrint(printer)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-cream-100 hover:bg-cream-200 text-brand-brown-dark rounded-xl text-xs font-bold transition-all cursor-pointer"
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>Test Slip</span>
+                          </button>
+                        </div>
 
-                        <button
-                          onClick={() => setEditingPrinter(printer)}
-                          className="p-2.5 text-text-secondary hover:text-brand-teal hover:bg-cream-100 rounded-xl transition-all"
-                          title="Edit Configuration"
-                        >
-                          <Edit2 className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => setEditingPrinter(printer)}
+                            className="p-2 text-text-secondary hover:text-brand-brown-dark hover:bg-cream-100 rounded-xl transition-all cursor-pointer"
+                            title="Edit Configuration"
+                          >
+                            <Edit2 className="w-4 h-4" />
+                          </button>
 
-                        <button
-                          onClick={() => handleDeletePrinter(printer.id)}
-                          className="p-2.5 text-text-secondary hover:text-status-danger hover:bg-status-danger-bg rounded-xl transition-all"
-                          title="Delete Printer"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                          <button
+                            onClick={() => handleDeletePrinter(printer.id)}
+                            className="p-2 text-text-secondary hover:text-status-danger hover:bg-status-danger-bg rounded-xl transition-all cursor-pointer"
+                            title="Delete Printer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -386,23 +432,39 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
 
           {/* TAB 2: PRINT QUEUE */}
           {activeTab === 'QUEUE' && (
-            <div className="space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex-1 flex flex-col min-h-0 space-y-3 overflow-hidden">
+              {/* Top Filter Bar (Fixed / Non-scrolling) */}
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-2.5 border-b border-[#EAE3DA] shrink-0">
                 <div>
-                  <h4 className="font-extrabold text-sm sm:text-base text-brand-brown-dark">
-                    Thermal Print Jobs & Dispatch Queue
+                  <h4 className="font-black text-sm sm:text-base text-brand-brown-dark flex items-center gap-2">
+                    <span>Thermal Print Jobs &amp; Spooler Queue</span>
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-cream-100 text-brand-brown-dark font-bold font-mono">
+                      {filteredJobs.length} {filteredJobs.length === 1 ? 'record' : 'records'}
+                    </span>
                   </h4>
-                  <p className="text-xs text-text-secondary">
-                    Monitor spooler statuses, retry failed tickets, and verify thermal receipts
+                  <p className="text-xs text-text-muted">
+                    Filter by date (day, month, year) or status to inspect and reprint slips
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Custom Designed Responsive Calendar Date Picker */}
+                  <CustomDatePicker
+                    value={filterDate}
+                    onChange={(newDate) => setFilterDate(newDate)}
+                    placeholder="All Dates"
+                    className="w-48"
+                    inputClassName="py-1.5 px-3 text-xs font-bold shadow-2xs"
+                    showPresets={true}
+                    align="right"
+                  />
+
+                  {/* Status Dropdown */}
                   <CustomSelect
                     value={filterJobStatus}
                     onChange={(val) => setFilterJobStatus(val)}
-                    buttonClassName="py-2 px-3 text-xs"
-                    className="w-36"
+                    buttonClassName="py-1.5 px-3 text-xs"
+                    className="w-32"
                     options={[
                       { value: 'ALL', label: 'All Statuses' },
                       { value: 'PRINTED', label: 'PRINTED' },
@@ -410,82 +472,83 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                       { value: 'QUEUED', label: 'QUEUED' },
                     ]}
                   />
-
-                  <button
-                    onClick={() => printerService.simulateFailedJob('#1099')}
-                    className="px-3.5 py-2 bg-cream-100 hover:bg-rose-50 hover:text-rose-600 border border-border rounded-xl text-xs font-extrabold transition-all"
-                  >
-                    Simulate Paper Jam
-                  </button>
                 </div>
               </div>
 
-              {/* Table */}
-              <div className="bg-white rounded-3xl border border-border shadow-soft overflow-hidden">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead>
-                      <tr className="border-b border-border bg-cream-50 text-text-secondary font-bold uppercase text-[10px]">
-                        <th className="py-3 px-4">Time</th>
-                        <th className="py-3 px-4">Type</th>
-                        <th className="py-3 px-4">Order / Ref</th>
-                        <th className="py-3 px-4">Target Printer</th>
-                        <th className="py-3 px-4 text-center">Status</th>
-                        <th className="py-3 px-4 text-right">Actions</th>
+              {/* Scrollable Table Records Container */}
+              <div className="flex-1 overflow-y-auto min-h-0 border border-[#F0EAE1] rounded-2xl scrollbar-thin">
+                <table className="w-full text-left text-xs">
+                  <thead className="sticky top-0 bg-white z-10 shadow-2xs">
+                    <tr className="border-b border-[#EAE3DA] text-text-muted font-bold uppercase text-[10px] tracking-wider bg-white">
+                      <th className="py-2.5 px-3 bg-white">Time</th>
+                      <th className="py-2.5 px-3 bg-white">Type</th>
+                      <th className="py-2.5 px-3 bg-white">Order / Ref</th>
+                      <th className="py-2.5 px-3 bg-white">Target Printer</th>
+                      <th className="py-2.5 px-3 bg-white text-center">Status</th>
+                      <th className="py-2.5 px-3 bg-white text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#F0EAE1]">
+                    {filteredJobs.length === 0 ? (
+                      <tr>
+                        <td colSpan={6} className="text-center py-12 text-text-muted font-medium">
+                          No print jobs found for {filterDate || 'selected filter'}.
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-cream-100 font-medium">
-                      {filteredJobs.length === 0 ? (
-                        <tr>
-                          <td colSpan={6} className="text-center py-12 text-text-secondary">
-                            No print jobs found.
+                    ) : (
+                      filteredJobs.map((job) => (
+                        <tr key={job.id} className="hover:bg-[#FAF7F2] transition-colors">
+                          <td className="py-2.5 px-3 text-text-muted font-mono text-[11px] whitespace-nowrap">
+                            {formatDateTime(job.createdAt)}
+                          </td>
+                          <td className="py-2.5 px-3 font-bold text-brand-brown-dark">
+                            {job.type}
+                          </td>
+                          <td className="py-2.5 px-3 font-mono font-bold text-brand-brown-dark">
+                            {job.orderNumber || '-'}
+                          </td>
+                          <td className="py-2.5 px-3 text-text-secondary text-xs">
+                            {job.printerName}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span
+                              className={`text-[11px] font-bold ${
+                                job.status === 'PRINTED'
+                                  ? 'text-emerald-700'
+                                  : job.status === 'FAILED'
+                                  ? 'text-red-600'
+                                  : 'text-amber-700'
+                              }`}
+                            >
+                              {job.status}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-right space-x-2 whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => handleViewSlip(job)}
+                              className="text-xs font-bold text-brand-teal hover:text-brand-teal-dark hover:underline cursor-pointer"
+                            >
+                              View Slip
+                            </button>
+                            {job.status === 'FAILED' && (
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await printerService.retryJob(job.id);
+                                  toast.success(`Job for ${job.orderNumber} re-printed!`);
+                                }}
+                                className="text-xs font-bold text-amber-700 hover:text-amber-900 hover:underline cursor-pointer"
+                              >
+                                Retry
+                              </button>
+                            )}
                           </td>
                         </tr>
-                      ) : (
-                        filteredJobs.map((job) => (
-                          <tr key={job.id} className="hover:bg-cream-50/60 transition-colors">
-                            <td className="py-3 px-4 text-text-secondary">{formatDateTime(job.createdAt)}</td>
-                            <td className="py-3 px-4 font-bold text-brand-brown-dark">{job.type}</td>
-                            <td className="py-3 px-4 font-black text-brand-teal">{job.orderNumber || '-'}</td>
-                            <td className="py-3 px-4 text-text-secondary">{job.printerName}</td>
-                            <td className="py-3 px-4 text-center">
-                              <span
-                                className={`px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase ${
-                                  job.status === 'PRINTED'
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : job.status === 'FAILED'
-                                    ? 'bg-rose-50 text-rose-700 border border-rose-200 animate-pulse'
-                                    : 'bg-amber-50 text-amber-700 border border-amber-200'
-                                }`}
-                              >
-                                {job.status}
-                              </span>
-                            </td>
-                            <td className="py-3 px-4 text-right space-x-1.5">
-                              <button
-                                onClick={() => setViewingTestJob(job)}
-                                className="px-2.5 py-1.5 bg-cream-100 hover:bg-cream-200 text-brand-brown font-bold text-[11px] rounded-lg transition-colors"
-                              >
-                                View Slip
-                              </button>
-                              {job.status === 'FAILED' && (
-                                <button
-                                  onClick={async () => {
-                                    await printerService.retryJob(job.id);
-                                    toast.success(`Job for ${job.orderNumber} re-printed!`);
-                                  }}
-                                  className="px-2.5 py-1.5 bg-brand-teal text-white font-extrabold text-[11px] rounded-lg shadow-teal"
-                                >
-                                  Retry
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}
@@ -562,26 +625,13 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
               <div className="pt-3 flex justify-end">
                 <button
                   type="submit"
-                  className="px-6 py-3 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-2xl font-extrabold text-xs shadow-teal transition-all active:scale-95"
+                  className="px-6 py-3 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-2xl font-extrabold text-xs shadow-teal transition-all active:scale-95 cursor-pointer"
                 >
                   Save Printing Preferences
                 </button>
               </div>
             </form>
           )}
-        </div>
-
-        {/* Modal Footer */}
-        <div className="p-4 sm:p-5 bg-cream-50 border-t border-border/80 flex items-center justify-between">
-          <span className="text-xs font-semibold text-text-secondary hidden sm:inline">
-            Press ESC or click Done when finished.
-          </span>
-          <button
-            onClick={onClose}
-            className="w-full sm:w-auto px-8 py-3 bg-brand-brown-dark hover:bg-brand-brown-deep text-white font-extrabold text-xs rounded-2xl shadow-soft transition-all active:scale-95 ml-auto"
-          >
-            Done
-          </button>
         </div>
       </div>
 
@@ -812,6 +862,24 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
           </div>,
           document.body
         )}
+
+      {/* Admin Designed Thermal Receipt Modal */}
+      {viewingReceiptOrder && (
+        <ThermalReceiptModal
+          order={viewingReceiptOrder}
+          isOpen={!!viewingReceiptOrder}
+          onClose={() => setViewingReceiptOrder(null)}
+        />
+      )}
+
+      {/* Admin Designed Kitchen Order Ticket (KOT) Modal */}
+      {viewingKOTOrder && (
+        <KOTPreviewModal
+          order={viewingKOTOrder}
+          isOpen={!!viewingKOTOrder}
+          onClose={() => setViewingKOTOrder(null)}
+        />
+      )}
     </div>
   );
 };

@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { orderService } from '@/services/orderService';
 import { promptDialog } from '@/store/useConfirmStore';
 import { Order } from '@/types';
+import { db } from '@/services/storage/db';
+import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { formatLKR, formatDateTime } from '@/utils/format';
-import { History, X, Printer, Utensils, RotateCcw, Search } from 'lucide-react';
+import { History, X, Printer, Utensils, RotateCcw, Search, Clock } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface OrdersHistoryDrawerProps {
@@ -24,9 +26,40 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
   userName,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [orders, setOrders] = useState<Order[]>(() => orderService.getOrders());
+
+  // Real-time synchronization whenever drawer is open
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const syncOrders = () => {
+      setOrders(orderService.getOrders());
+    };
+
+    syncOrders();
+    const unsubDb = db.subscribe(syncOrders);
+    const unsubRefundReq = realtimeSocketService.on('ORDER_REFUND_REQUESTED', syncOrders);
+    const unsubRefunded = realtimeSocketService.on('ORDER_REFUNDED', syncOrders);
+    const unsubUpdated = realtimeSocketService.on('ORDER_UPDATED', syncOrders);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key?.includes('cafemm') || e.key?.includes('order')) {
+        syncOrders();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      unsubDb();
+      unsubRefundReq();
+      unsubRefunded();
+      unsubUpdated();
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, [isOpen]);
 
   // Close with Escape key
-  React.useEffect(() => {
+  useEffect(() => {
     if (!isOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -42,7 +75,6 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const orders = orderService.getOrders();
   const today = new Date();
   const isToday = (dateStr: string) => {
     try {
@@ -66,24 +98,25 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
 
   const handleRefund = async (order: Order) => {
     const reason = await promptDialog({
-      title: `Refund Order ${order.orderNumber}?`,
-      message: 'Enter reason for processing this order refund:',
+      title: `Request Refund for Order ${order.orderNumber}`,
+      message: 'Enter reason for this refund request (sent to Admin for confirmation):',
       defaultValue: 'Customer change of mind',
-      placeholder: 'e.g. Customer change of mind, wrong order...',
-      confirmText: 'Process Refund',
-      variant: 'danger',
+      placeholder: 'e.g. Customer change of mind, wrong order, food issue...',
+      confirmText: 'Submit Request to Admin',
+      variant: 'warning',
     });
     if (!reason || !reason.trim()) return;
     try {
-      await orderService.refundOrder({
+      const updated = await orderService.requestRefund({
         orderId: order.id,
         reason: reason.trim(),
         userId,
         userName,
       });
-      toast.success(`Order ${order.orderNumber} refunded successfully.`);
+      setOrders(orderService.getOrders());
+      toast.success(`Refund request for ${order.orderNumber} submitted to Admin.`);
     } catch (err: any) {
-      toast.error(err.message || 'Refund failed');
+      toast.error(err.message || 'Refund request failed');
     }
   };
 
@@ -130,7 +163,8 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
             </div>
           ) : (
             filtered.map((order) => {
-              const isRefunded = order.status === 'REFUNDED' || order.status === 'PARTIALLY_REFUNDED';
+              const isRefunded = order.status === 'REFUNDED' || order.status === 'PARTIALLY_REFUNDED' || order.refundStatus === 'APPROVED';
+              const isRefundPending = order.status === 'REFUND_PENDING' || order.refundStatus === 'PENDING_APPROVAL';
 
               return (
                 <div
@@ -144,6 +178,12 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-cream-200 text-brand-brown uppercase">
                           {order.orderType === 'DINE_IN' ? `Table ${order.tableNumber || '01'}` : 'Takeaway'}
                         </span>
+                        {isRefundPending && (
+                          <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-amber-500 text-white uppercase flex items-center gap-1 shadow-xs animate-pulse">
+                            <Clock className="w-2.5 h-2.5" />
+                            Pending Admin Approval
+                          </span>
+                        )}
                         {isRefunded && (
                           <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded bg-status-danger text-white uppercase">
                             Refunded
@@ -185,15 +225,20 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
                       <Printer className="w-3 h-3" />
                       Receipt
                     </button>
-                    {!isRefunded && (
+                    {isRefundPending ? (
+                      <span className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-800 bg-amber-100/70 border border-amber-300/80 rounded-lg cursor-not-allowed">
+                        <Clock className="w-3 h-3 text-amber-600 animate-spin" />
+                        Pending Approval
+                      </span>
+                    ) : !isRefunded ? (
                       <button
                         onClick={() => handleRefund(order)}
-                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-status-danger bg-white border border-status-danger/30 rounded-lg hover:bg-status-danger-bg"
+                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-status-danger bg-white border border-status-danger/30 rounded-lg hover:bg-status-danger-bg transition-colors"
                       >
                         <RotateCcw className="w-3 h-3" />
                         Refund
                       </button>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               );

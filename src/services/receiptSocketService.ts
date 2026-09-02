@@ -1,11 +1,16 @@
-import { ReceiptCustomizationSettings } from '@/types';
+import { ReceiptCustomizationSettings, KotCustomizationSettings } from '@/types';
 import { db } from './storage/db';
 
 export type SocketStatus = 'CONNECTED' | 'CONNECTING' | 'DISCONNECTED';
 
 export interface SocketMessage {
   id: string;
-  type: 'RECEIPT_TEMPLATE_UPDATED' | 'POS_HEARTBEAT' | 'TERMINAL_CONNECTED' | 'TEST_PRINT_REQUEST';
+  type:
+    | 'RECEIPT_TEMPLATE_UPDATED'
+    | 'KOT_TEMPLATE_UPDATED'
+    | 'POS_HEARTBEAT'
+    | 'TERMINAL_CONNECTED'
+    | 'TEST_PRINT_REQUEST';
   source: string;
   timestamp: string;
   payload?: any;
@@ -89,6 +94,31 @@ class ReceiptSocketService {
     const message: SocketMessage = {
       id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
       type: 'RECEIPT_TEMPLATE_UPDATED',
+      source,
+      timestamp: new Date().toISOString(),
+      payload: settings,
+    };
+
+    if (this.channel) {
+      this.channel.postMessage(message);
+    }
+    this.notifyListeners(message);
+  }
+
+  /**
+   * Broadcast real-time KOT ticket customization update to POS registers & Kitchen terminals
+   */
+  public broadcastKotUpdate(settings: KotCustomizationSettings, source: string = 'Admin Studio') {
+    // 1. Update Database
+    db.update('settings', (prev) => ({
+      ...prev,
+      kotCustomization: settings,
+    }));
+
+    // 2. Broadcast over WebSocket channel
+    const message: SocketMessage = {
+      id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      type: 'KOT_TEMPLATE_UPDATED',
       source,
       timestamp: new Date().toISOString(),
       payload: settings,

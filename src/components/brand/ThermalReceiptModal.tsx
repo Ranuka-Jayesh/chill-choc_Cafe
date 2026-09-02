@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Order } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatLKR, formatDateTime } from '@/utils/format';
-import { Printer, CheckCircle2 } from 'lucide-react';
+import { Printer, CheckCircle2, X } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface ThermalReceiptModalProps {
@@ -71,17 +71,26 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
     : custom?.dividerStyle === 'solid'
     ? 'border-b border-zinc-400'
     : 'border-b border-dashed border-zinc-400';
-  const paperWidthClass = custom?.paperWidthMm === 58 ? 'max-w-[280px]' : 'max-w-[350px] sm:max-w-[360px]';
+  const paperWidthClass = custom?.paperWidthMm === 58 ? 'max-w-[280px]' : 'max-w-[340px] sm:max-w-[360px]';
 
   return createPortal(
     <div
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
-      className="fixed inset-0 z-[999999] w-full h-full flex flex-col items-center justify-center p-3 sm:p-5 bg-black/65 backdrop-blur-md animate-in fade-in"
+      className="fixed inset-0 z-[999999] w-full h-full overflow-y-auto bg-black/75 backdrop-blur-md flex flex-col items-center justify-start p-4 py-8 sm:p-6 sm:py-10 animate-in fade-in"
     >
-      {/* Scroll Container with breathing room / space between scrollbar and receipt */}
-      <div className="w-full max-w-[420px] max-h-[82vh] sm:max-h-[85vh] overflow-y-auto pr-3.5 pl-1.5 py-2 flex flex-col items-center custom-scrollbar">
+      {/* Floating Top-Right Close Button */}
+      <button
+        onClick={onClose}
+        className="fixed top-3 right-3 sm:top-5 sm:right-5 p-2.5 rounded-full bg-white/10 hover:bg-white/20 text-white backdrop-blur-md border border-white/20 shadow-lg transition-all active:scale-95 cursor-pointer z-50"
+        title="Close Receipt (Esc)"
+      >
+        <X className="w-5 h-5" />
+      </button>
+
+      {/* Centered Scrollable Wrapper */}
+      <div className="w-full max-w-[380px] my-auto flex flex-col items-center">
         {/* Dynamic Thermal Paper Slip */}
         <div
           id="printable-receipt"
@@ -146,24 +155,34 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
           {/* Purchased Line Items */}
           <div className={`py-2.5 ${dividerClass} space-y-2 text-xs`}>
             <div className="flex justify-between font-black text-[10px] text-zinc-500 uppercase tracking-wider pb-1 border-b border-zinc-200">
-              <span>Item</span>
-              <span>Total</span>
+              <span>ITEM</span>
+              <span>TOTAL (Rs)</span>
             </div>
             {order.items.map((item, idx) => (
               <div key={idx} className="space-y-0.5">
-                <div className="flex justify-between font-bold text-zinc-950">
-                  <span>
+                <div className="flex justify-between items-start gap-2 font-bold text-zinc-950">
+                  <span className="flex-1">
                     {item.quantity}x {item.name}
                   </span>
-                  <span className="tabular-nums">{formatLKR(item.itemTotalCents)}</span>
+                  <span className="tabular-nums whitespace-nowrap text-right shrink-0">
+                    {(item.itemTotalCents / 100).toLocaleString('en-US', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </span>
                 </div>
                 {(custom?.showModifiers ?? true) &&
                   item.modifiers.map((mod, mIdx) => (
-                    <div key={mIdx} className="text-[10px] text-zinc-600 pl-3">
-                      + {mod.optionName}{' '}
-                      {(custom?.showModifierPrices ?? true) &&
-                        mod.priceCents > 0 &&
-                        `(${formatLKR(mod.priceCents)})`}
+                    <div key={mIdx} className="text-[10px] text-zinc-600 pl-3 flex justify-between gap-2">
+                      <span>+ {mod.optionName}</span>
+                      {(custom?.showModifierPrices ?? true) && mod.priceCents > 0 && (
+                        <span className="tabular-nums whitespace-nowrap shrink-0 text-zinc-500">
+                          {(mod.priceCents / 100).toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </span>
+                      )}
                     </div>
                   ))}
                 {(custom?.showItemNotes ?? true) && item.notes && (
@@ -181,15 +200,30 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
                 <span className="tabular-nums">{formatLKR(order.subtotalCents)}</span>
               </div>
             )}
-            {(custom?.showDiscount ?? true) && order.discountCents > 0 && (
-              <div className="flex justify-between text-zinc-600">
-                <span>Discount:</span>
-                <span className="tabular-nums">-{formatLKR(order.discountCents)}</span>
-              </div>
-            )}
+            {(() => {
+              const loyaltyDisc = order.loyaltyDiscountCents || 0;
+              const manualDisc = Math.max(0, (order.discountCents || 0) - loyaltyDisc);
+
+              return (
+                <>
+                  {(custom?.showDiscount ?? true) && manualDisc > 0 && (
+                    <div className="flex justify-between text-zinc-600">
+                      <span>Discount:</span>
+                      <span className="tabular-nums">-{formatLKR(manualDisc)}</span>
+                    </div>
+                  )}
+                  {(custom?.showDiscount ?? true) && loyaltyDisc > 0 && (
+                    <div className="flex justify-between text-zinc-600">
+                      <span>Loyalty Discount:</span>
+                      <span className="tabular-nums">-{formatLKR(loyaltyDisc)}</span>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             {(custom?.showServiceCharge ?? true) && order.serviceChargeCents > 0 && (
               <div className="flex justify-between text-zinc-600">
-                <span>{custom?.serviceChargeLabel || 'Service Charge'}:</span>
+                <span>Service Charge{settings?.serviceChargePercent ? ` (${settings.serviceChargePercent}%)` : ''}:</span>
                 <span className="tabular-nums">+{formatLKR(order.serviceChargeCents)}</span>
               </div>
             )}
@@ -227,8 +261,47 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
             )}
           </div>
 
+          {/* Customer Name & Loyalty in Footer (Monochrome, No colors, Shows Total Points) */}
+          {(custom?.showCustomerInfo ?? true) && (order.customerName || (order as any).customer?.name) && (() => {
+            const cust = order.customerId
+              ? db.getSnapshot().customers.find((c) => c.id === order.customerId)
+              : order.customerPhone
+              ? db.getSnapshot().customers.find((c) => c.phone === order.customerPhone)
+              : order.customerName
+              ? db.getSnapshot().customers.find((c) => c.name.toLowerCase() === order.customerName?.toLowerCase())
+              : null;
+
+            const hasRedeemed = !!(order.loyaltyPointsRedeemed && order.loyaltyPointsRedeemed > 0);
+            const hasEarned = !!(order.loyaltyPointsEarned && order.loyaltyPointsEarned > 0);
+
+            return (
+              <div className="pt-2 text-center text-[10.5px] text-black font-mono space-y-0.5 select-text">
+                <div>
+                  <span className="uppercase font-semibold text-zinc-700">CUSTOMER: </span>
+                  <span className="font-bold text-black">{order.customerName || (order as any).customer?.name}</span>
+                </div>
+
+                {hasRedeemed ? (
+                  <div className="text-[10px] text-black font-mono font-medium">
+                    <span>Redeemed: -{order.loyaltyPointsRedeemed} Pts</span>
+                    {cust && <span> | Total Points: {cust.points} Pts</span>}
+                  </div>
+                ) : hasEarned ? (
+                  <div className="text-[10px] text-black font-mono font-medium">
+                    <span>Earned: +{order.loyaltyPointsEarned} Pts</span>
+                    {cust && <span> | Total Points: {cust.points} Pts</span>}
+                  </div>
+                ) : cust ? (
+                  <div className="text-[10px] text-black font-mono font-medium">
+                    <span>Total Points: {cust.points} Pts</span>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })()}
+
           {/* Footer Message */}
-          <div className="pt-3 pb-1 text-center text-[10px] text-zinc-600 whitespace-pre-line leading-normal">
+          <div className="pt-1.5 pb-1 text-center text-[10px] text-zinc-600 whitespace-pre-line leading-normal">
             {custom?.receiptFooter || settings.receiptFooter}
           </div>
 
@@ -252,24 +325,26 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
             </div>
           </div>
         </div>
-      </div>
 
-      {/* Floating Action Buttons Below Slip (No box/container background) */}
-      <div className="flex items-center justify-center gap-2.5 sm:gap-3 mt-3.5 sm:mt-4 flex-wrap z-10">
-        <button
-          onClick={onClose}
-          className="px-6 py-2.5 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-md text-xs sm:text-sm font-bold transition-all active:scale-95 border border-white/20 shadow-lg cursor-pointer"
-        >
-          Done
-        </button>
+        {/* Floating Action Buttons Below Slip */}
+        <div className="flex items-center justify-center gap-2.5 sm:gap-3 mt-4 flex-wrap z-10 shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-6 py-2.5 rounded-full bg-white/20 hover:bg-white/30 text-white backdrop-blur-md text-xs sm:text-sm font-bold transition-all active:scale-95 border border-white/20 shadow-lg cursor-pointer"
+          >
+            Done
+          </button>
 
-        <button
-          onClick={handlePrint}
-          className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white text-xs sm:text-sm font-black shadow-teal transition-all active:scale-95 border border-brand-teal-light/20 cursor-pointer"
-        >
-          <Printer className="w-4 h-4" />
-          <span>Print Receipt (80mm)</span>
-        </button>
+          <button
+            type="button"
+            onClick={handlePrint}
+            className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white text-xs sm:text-sm font-black shadow-teal transition-all active:scale-95 border border-brand-teal-light/20 cursor-pointer"
+          >
+            <Printer className="w-4 h-4" />
+            <span>Print Receipt (80mm)</span>
+          </button>
+        </div>
       </div>
     </div>,
     document.body

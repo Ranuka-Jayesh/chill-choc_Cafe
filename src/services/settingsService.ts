@@ -2,9 +2,26 @@ import { db } from './storage/db';
 import { realtimeSocketService } from './realtimeSocketService';
 import { SystemSettings, AuditLog, AuditAction } from '@/types';
 
+const DEFAULT_LOYALTY_SETTINGS = {
+  loyaltyProgramEnabled: true,
+  loyaltyProgramName: 'Chill Club Rewards',
+  loyaltySpendPerPointCents: 10000,
+  loyaltyMinSpendToEarnCents: 20000,
+  loyaltyPointRedemptionValueCents: 100,
+  loyaltyMinPointsToRedeem: 50,
+  loyaltyMaxRedemptionPercentPerOrder: 50,
+  loyaltySignupBonusPoints: 25,
+  loyaltyBirthdayBonusPoints: 50,
+  loyaltyPointsExpiryDays: 365,
+};
+
 export const settingsService = {
   getSettings: (): SystemSettings => {
-    return db.getSnapshot().settings;
+    const s = db.getSnapshot().settings;
+    return {
+      ...DEFAULT_LOYALTY_SETTINGS,
+      ...s,
+    };
   },
 
   updateSettings: (partial: Partial<SystemSettings>, userId = 'usr_admin', userName = 'Admin'): SystemSettings => {

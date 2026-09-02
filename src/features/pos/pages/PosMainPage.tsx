@@ -22,6 +22,7 @@ import { PosPrinterSettingsModal } from '../components/PosPrinterSettingsModal';
 import { OrdersHistoryDrawer } from '../components/OrdersHistoryDrawer';
 import { PosExpensesDrawer } from '../components/PosExpensesDrawer';
 import { PosStockDrawer } from '../components/PosStockDrawer';
+import { PosAttendanceModal } from '../components/PosAttendanceModal';
 import { HeldOrdersModal } from '../components/HeldOrdersModal';
 import { ThermalReceiptModal } from '@/components/brand/ThermalReceiptModal';
 import { KOTPreviewModal } from '@/components/brand/KOTPreviewModal';
@@ -45,6 +46,7 @@ export const PosMainPage: React.FC = () => {
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCashInOutOpen, setIsCashInOutOpen] = useState(false);
   const [isExpensesOpen, setIsExpensesOpen] = useState(false);
+  const [isAttendanceOpen, setIsAttendanceOpen] = useState(false);
   const [isStockDrawerOpen, setIsStockDrawerOpen] = useState(false);
   const [isPrinterQueueOpen, setIsPrinterQueueOpen] = useState(false);
   const [isOrdersHistoryOpen, setIsOrdersHistoryOpen] = useState(false);
@@ -294,6 +296,7 @@ export const PosMainPage: React.FC = () => {
         shift={activeShift}
         onOpenOrdersHistory={() => setIsOrdersHistoryOpen(true)}
         onOpenExpenses={() => setIsExpensesOpen(true)}
+        onOpenAttendance={() => setIsAttendanceOpen(true)}
         onOpenStockDrawer={() => setIsStockDrawerOpen(true)}
         onOpenCashInOut={() => setIsCashInOutOpen(true)}
         onOpenPrinterManager={() => setIsPrinterQueueOpen(true)}
@@ -539,6 +542,12 @@ export const PosMainPage: React.FC = () => {
         onClose={() => setIsExpensesOpen(false)}
         shift={activeShift}
         user={session.user}
+      />
+
+      {/* 9b. Staff Attendance & Digital Clock-In Modal */}
+      <PosAttendanceModal
+        isOpen={isAttendanceOpen}
+        onClose={() => setIsAttendanceOpen(false)}
       />
 
       {/* 10. Live Ingredients Stock & Expiry Slide-over Drawer */}

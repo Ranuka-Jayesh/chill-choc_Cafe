@@ -101,6 +101,22 @@ class DatabaseManager {
       const merged: DatabaseSchema = {
         ...INITIAL_DATABASE,
         ...parsed,
+        settings: {
+          ...INITIAL_DATABASE.settings,
+          ...(parsed.settings || {}),
+        },
+        rateHistories:
+          parsed.rateHistories && parsed.rateHistories.length > 0
+            ? parsed.rateHistories
+            : INITIAL_DATABASE.rateHistories,
+        loyaltyHistories:
+          parsed.loyaltyHistories && parsed.loyaltyHistories.length > 0
+            ? parsed.loyaltyHistories
+            : INITIAL_DATABASE.loyaltyHistories,
+        customers:
+          parsed.customers && parsed.customers.length > 0
+            ? parsed.customers
+            : INITIAL_DATABASE.customers,
         products: mergedProducts,
         orders: parsed.orders && parsed.orders.length > 0 ? parsed.orders : sample.orders,
         expenses: parsed.expenses && parsed.expenses.length > 0 ? parsed.expenses : sample.expenses,

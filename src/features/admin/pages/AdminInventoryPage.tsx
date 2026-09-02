@@ -12,8 +12,11 @@ import {
   PurchasePaymentSplit,
   PurchasePaymentMethod,
   PurchasePaymentStatus,
+  StockRequest,
 } from '@/types';
 import { db } from '@/services/storage/db';
+import { authService } from '@/services/authService';
+import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { formatLKR, formatDateTime } from '@/utils/format';
 import {
   History,
@@ -22,6 +25,7 @@ import {
   Minus,
   Search,
   CheckCircle2,
+  XCircle,
   X,
   Boxes,
   ArrowDownRight,
@@ -50,15 +54,17 @@ import {
   Printer,
   Copy,
 } from 'lucide-react';
-import { confirmDialog } from '@/store/useConfirmStore';
+import { confirmDialog, promptDialog } from '@/store/useConfirmStore';
 import { CustomDatePicker } from '@/components/ui/CustomDatePicker';
 import { toast } from 'sonner';
+import { format } from 'date-fns';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
 import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
 
-type ActiveTab = 'stock' | 'movements' | 'purchases';
+type ActiveTab = 'stock' | 'movements' | 'purchases' | 'requests';
 type StockStatusFilter = 'ALL' | 'EXPIRED' | 'EXPIRING_SOON' | 'OPTIMAL' | 'LOW' | 'OUT';
 type MovementFilter = 'ALL' | 'PURCHASE' | 'SALE_CONSUMPTION' | 'RETURN' | 'ADJUSTMENT' | 'WASTE';
+type RequestStatusFilter = 'ALL' | 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
 
 const STOCK_STATUS_OPTIONS: SelectOption[] = [
   { value: 'ALL', label: 'All Stock Levels' },
@@ -78,11 +84,18 @@ const MOVEMENT_FILTER_OPTIONS: SelectOption[] = [
   { value: 'WASTE', label: 'Waste / Spoilage' },
 ];
 
+const REQUEST_STATUS_OPTIONS: SelectOption[] = [
+  { value: 'ALL', label: 'All Requests' },
+  { value: 'PENDING_APPROVAL', label: 'Pending Review' },
+  { value: 'APPROVED', label: 'Approved Requests' },
+  { value: 'REJECTED', label: 'Rejected Requests' },
+];
+
 export const AdminInventoryPage: React.FC = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = searchParams.get('tab');
   const activeTab: ActiveTab =
-    rawTab === 'movements' || rawTab === 'purchases' || rawTab === 'stock'
+    rawTab === 'movements' || rawTab === 'purchases' || rawTab === 'stock' || rawTab === 'requests'
       ? rawTab
       : 'stock';
 
@@ -99,6 +112,13 @@ export const AdminInventoryPage: React.FC = () => {
   const [movements, setMovements] = useState<InventoryMovement[]>(inventoryService.getMovements());
   const [purchases, setPurchases] = useState<Purchase[]>(catalogService.getPurchases());
   const [suppliers, setSuppliers] = useState<Supplier[]>(catalogService.getSuppliers());
+  const [stockRequests, setStockRequests] = useState<StockRequest[]>(inventoryService.getStockRequests());
+
+  // Editing Stock Request Modal State
+  const [editingRequest, setEditingRequest] = useState<StockRequest | null>(null);
+  const [editRequestQty, setEditRequestQty] = useState<string>('');
+  const [editRequestCost, setEditRequestCost] = useState<string>('');
+  const [editRequestExpiry, setEditRequestExpiry] = useState<string>('');
 
   // Search & Filters
   const [search, setSearch] = useState('');
@@ -106,12 +126,14 @@ export const AdminInventoryPage: React.FC = () => {
   const [stockStatusFilter, setStockStatusFilter] = useState<StockStatusFilter>('ALL');
   const [movementFilter, setMovementFilter] = useState<MovementFilter>('ALL');
   const [ingredientFilter, setIngredientFilter] = useState<string>('ALL');
+  const [requestStatusFilter, setRequestStatusFilter] = useState<RequestStatusFilter>('ALL');
 
   // Modals State
   const [editingIngredient, setEditingIngredient] = useState<Partial<Ingredient> | null>(null);
   const [isReceiveModalOpen, setIsReceiveModalOpen] = useState(false);
   const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
   const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
+  const [viewingRequest, setViewingRequest] = useState<StockRequest | null>(null);
 
   // New Purchase Form State
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>('');
@@ -119,6 +141,8 @@ export const AdminInventoryPage: React.FC = () => {
   const [invoiceNumber, setInvoiceNumber] = useState(`INV-${Date.now().toString().slice(-4)}`);
   const [purchaseItems, setPurchaseItems] = useState<PurchaseItem[]>([]);
   const [purchaseNotes, setPurchaseNotes] = useState<string>('');
+  const [purchaseSearch, setPurchaseSearch] = useState<string>('');
+  const [isPurchaseSearchFocused, setIsPurchaseSearchFocused] = useState<boolean>(false);
 
   // Active Suppliers Memo
   const activeSuppliers = useMemo(() => suppliers.filter((s) => s.active !== false), [suppliers]);
@@ -201,6 +225,7 @@ export const AdminInventoryPage: React.FC = () => {
   });
 
   // Manual Stock Adjustment Form State
+  const [isSpecificIngredientAdjust, setIsSpecificIngredientAdjust] = useState(false);
   const [adjustIngredientId, setAdjustIngredientId] = useState<string>('');
   const [adjustType, setAdjustType] = useState<'ADD' | 'DEDUCT' | 'EXACT'>('ADD');
   const [adjustQuantity, setAdjustQuantity] = useState<number>(1);
@@ -249,16 +274,128 @@ export const AdminInventoryPage: React.FC = () => {
   };
 
   // ---------------------------------------------------------------------------
-  // Lifecycle & Synchronization
+  // Lifecycle & Synchronization (DB & Realtime Sockets)
   // ---------------------------------------------------------------------------
   useEffect(() => {
     const unsub = db.subscribe(() => {
       setIngredients(inventoryService.getIngredients());
       setMovements(inventoryService.getMovements());
       setPurchases(catalogService.getPurchases());
+      setStockRequests(inventoryService.getStockRequests());
     });
-    return unsub;
+
+    const handleRealtime = () => {
+      setIngredients(inventoryService.getIngredients());
+      setMovements(inventoryService.getMovements());
+      setPurchases(catalogService.getPurchases());
+      setStockRequests(inventoryService.getStockRequests());
+    };
+
+    const unsub1 = realtimeSocketService.on('STOCK_CHANGED', handleRealtime);
+    const unsub2 = realtimeSocketService.on('STOCK_REQUEST_PENDING', handleRealtime);
+    const unsub3 = realtimeSocketService.on('STOCK_REQUEST_APPROVED', handleRealtime);
+    const unsub4 = realtimeSocketService.on('STOCK_REQUEST_REJECTED', handleRealtime);
+
+    return () => {
+      unsub();
+      unsub1();
+      unsub2();
+      unsub3();
+      unsub4();
+    };
   }, []);
+
+  // Pending Cashier Stock Requests Memo
+  const pendingStockRequests = useMemo(() => {
+    return stockRequests.filter((r) => r.status === 'PENDING_APPROVAL');
+  }, [stockRequests]);
+
+  // Stock Request Authorization Handlers
+  const handleApproveStockRequest = (req: StockRequest) => {
+    const session = authService.getCurrentSession();
+    const adminId = session?.user?.id || 'usr_admin';
+    const adminName = session?.user?.name || 'Administrator';
+
+    try {
+      inventoryService.approveStockRequest({
+        requestId: req.id,
+        adminId,
+        adminName,
+      });
+      toast.success(
+        `Approved ${req.type === 'STOCK_DELIVERY' ? 'delivery intake' : 'stock adjustment'} for "${req.ingredientName}".`
+      );
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to approve request');
+    }
+  };
+
+  const handleRejectStockRequest = async (req: StockRequest) => {
+    const reason = await promptDialog({
+      title: `Reject ${req.type === 'STOCK_DELIVERY' ? 'Delivery Intake' : 'Stock Adjustment'} Request`,
+      message: `Enter rejection reason for ${req.requestedByUserName}'s request on "${req.ingredientName}":`,
+      defaultValue: 'Declined by administrator',
+      confirmText: 'Reject Request',
+      variant: 'danger',
+    });
+
+    if (reason === null) return;
+
+    const session = authService.getCurrentSession();
+    const adminId = session?.user?.id || 'usr_admin';
+    const adminName = session?.user?.name || 'Administrator';
+
+    try {
+      inventoryService.rejectStockRequest({
+        requestId: req.id,
+        adminId,
+        adminName,
+        reason: reason || 'Declined by administrator',
+      });
+      toast.info(`Rejected request for "${req.ingredientName}".`);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to reject request');
+    }
+  };
+
+  const handleOpenEditRequestModal = (req: StockRequest) => {
+    setEditingRequest(req);
+    setEditRequestQty(
+      String(req.type === 'STOCK_ADJUSTMENT' ? (req.requestedStock ?? req.currentStock) : req.quantityChange)
+    );
+    setEditRequestCost(req.costCents ? String(req.costCents / 100) : '');
+    setEditRequestExpiry(req.expiryDate || '');
+  };
+
+  const handleSaveAndApproveRequest = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRequest) return;
+    const parsedQty = parseFloat(editRequestQty);
+    if (isNaN(parsedQty) || parsedQty < 0) {
+      toast.error('Please enter a valid quantity.');
+      return;
+    }
+
+    const parsedCost = editRequestCost ? Math.round(parseFloat(editRequestCost) * 100) : undefined;
+    const session = authService.getCurrentSession();
+    const adminId = session?.user?.id || 'usr_admin';
+    const adminName = session?.user?.name || 'Administrator';
+
+    try {
+      inventoryService.approveStockRequest({
+        requestId: editingRequest.id,
+        adminId,
+        adminName,
+        modifiedQty: parsedQty,
+        modifiedCost: parsedCost,
+        modifiedExpiry: editRequestExpiry || undefined,
+      });
+      toast.success(`Modified & approved request for "${editingRequest.ingredientName}".`);
+      setEditingRequest(null);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to approve request');
+    }
+  };
 
   // Handle Escape key to close any open modal/form
   useEffect(() => {
@@ -271,6 +408,10 @@ export const AdminInventoryPage: React.FC = () => {
         if (viewingPurchase) {
           setViewingPurchase(null);
           setIsAddingPayment(false);
+          return;
+        }
+        if (viewingRequest) {
+          setViewingRequest(null);
           return;
         }
         if (isReceiveModalOpen) {
@@ -290,7 +431,7 @@ export const AdminInventoryPage: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAddingPayment, viewingPurchase, isReceiveModalOpen, editingIngredient, isAdjustModalOpen]);
+  }, [isAddingPayment, viewingPurchase, viewingRequest, isReceiveModalOpen, editingIngredient, isAdjustModalOpen]);
 
   const handleTabChange = (tab: ActiveTab) => {
     setSearchParams({ tab });
@@ -463,6 +604,34 @@ export const AdminInventoryPage: React.FC = () => {
   }, [purchases, dateRange, search]);
 
   // ---------------------------------------------------------------------------
+  // Filtering Cashier Requests (Requests Tab)
+  // ---------------------------------------------------------------------------
+  const filteredRequests = useMemo(() => {
+    return stockRequests.filter((r) => {
+      if (requestStatusFilter !== 'ALL' && r.status !== requestStatusFilter) return false;
+
+      if (dateRange.year !== 'ALL') {
+        const rDate = new Date(r.createdAt);
+        if (String(rDate.getFullYear()) !== dateRange.year) return false;
+        if (dateRange.month !== 'ALL' && String(rDate.getMonth() + 1) !== dateRange.month) return false;
+      }
+
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        const matchIng = r.ingredientName.toLowerCase().includes(q);
+        const matchReq = r.requestNumber.toLowerCase().includes(q);
+        const matchReason = r.reason.toLowerCase().includes(q);
+        const matchUser = r.requestedByUserName.toLowerCase().includes(q);
+        const matchSupplier = r.supplierName?.toLowerCase().includes(q);
+        const matchInv = r.invoiceNumber?.toLowerCase().includes(q);
+        const matchItems = r.items?.some((it) => it.ingredientName.toLowerCase().includes(q));
+        if (!matchIng && !matchReq && !matchReason && !matchUser && !matchSupplier && !matchInv && !matchItems) return false;
+      }
+      return true;
+    });
+  }, [stockRequests, requestStatusFilter, dateRange, search]);
+
+  // ---------------------------------------------------------------------------
   // Handlers for Ingredients
   // ---------------------------------------------------------------------------
   const handleOpenAddIngredient = () => {
@@ -572,6 +741,32 @@ export const AdminInventoryPage: React.FC = () => {
     ]);
   };
 
+  const filteredPurchaseSearchIngs = useMemo(() => {
+    if (!purchaseSearch.trim()) return [];
+    const q = purchaseSearch.toLowerCase();
+    const list = availableIngredients.length > 0 ? availableIngredients : ingredients;
+    return list
+      .filter((ing) => ing.name.toLowerCase().includes(q) || ing.sku.toLowerCase().includes(q))
+      .slice(0, 8);
+  }, [purchaseSearch, availableIngredients, ingredients]);
+
+  const handleAddSearchedPurchaseItem = (ing: Ingredient) => {
+    setPurchaseItems((prev) => [
+      ...prev,
+      {
+        ingredientId: ing.id,
+        ingredientName: ing.name,
+        quantity: 1,
+        unit: ing.unit,
+        unitPriceCents: ing.averageCostCents || 50000,
+        totalCents: ing.averageCostCents || 50000,
+      },
+    ]);
+    setPurchaseSearch('');
+    setIsPurchaseSearchFocused(false);
+    toast.success(`Added "${ing.name}" to received items.`);
+  };
+
   const handleUpdatePurchaseItem = (index: number, updates: Partial<PurchaseItem>) => {
     setPurchaseItems((prev) => {
       const next = [...prev];
@@ -671,8 +866,13 @@ export const AdminInventoryPage: React.FC = () => {
   // Handlers for Manual Stock Adjustment
   // ---------------------------------------------------------------------------
   const handleOpenAdjustModal = (preselectedIngId?: string) => {
-    const targetId = preselectedIngId || (ingredients[0] ? ingredients[0].id : '');
-    setAdjustIngredientId(targetId);
+    if (preselectedIngId) {
+      setAdjustIngredientId(preselectedIngId);
+      setIsSpecificIngredientAdjust(true);
+    } else {
+      setAdjustIngredientId(ingredients[0] ? ingredients[0].id : '');
+      setIsSpecificIngredientAdjust(false);
+    }
     setAdjustType('ADD');
     setAdjustQuantity(1);
     setAdjustReason('Physical stock inventory audit');
@@ -777,6 +977,30 @@ export const AdminInventoryPage: React.FC = () => {
               {purchases.length}
             </span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => handleTabChange('requests')}
+            className={`h-full flex items-center gap-2.5 px-4 py-2 rounded-full text-xs sm:text-[13px] font-black transition-all cursor-pointer select-none active:scale-98 whitespace-nowrap ${
+              activeTab === 'requests'
+                ? 'bg-brand-teal text-white shadow-teal'
+                : 'text-brand-brown hover:text-brand-brown-deep hover:bg-cream-50'
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            <span>Cashier Requests</span>
+            <span
+              className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold tabular-nums ${
+                activeTab === 'requests'
+                  ? 'bg-white/20 text-white'
+                  : pendingStockRequests.length > 0
+                  ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                  : 'bg-cream-100 text-brand-brown-dark'
+              }`}
+            >
+              {pendingStockRequests.length > 0 ? pendingStockRequests.length : stockRequests.length}
+            </span>
+          </button>
         </div>
 
         {/* Right: Filters / KPIs based on Active Tab */}
@@ -842,8 +1066,159 @@ export const AdminInventoryPage: React.FC = () => {
           {activeTab === 'purchases' && (
             <MonthYearPicker value={dateRange} onChange={(newVal) => setDateRange(newVal)} />
           )}
+
+          {activeTab === 'requests' && (
+            <>
+              <div className="w-auto min-w-[150px] sm:min-w-[175px]">
+                <CustomSelect
+                  value={requestStatusFilter}
+                  onChange={(val) => setRequestStatusFilter(val as RequestStatusFilter)}
+                  options={REQUEST_STATUS_OPTIONS}
+                  align="right"
+                  buttonClassName="h-9 !py-0 px-3.5 bg-[#FAF7F2] hover:bg-cream-100 border-[#E0D7CC] rounded-full text-xs font-bold text-brand-brown-dark shadow-xs"
+                />
+              </div>
+
+              <MonthYearPicker value={dateRange} onChange={(newVal) => setDateRange(newVal)} />
+            </>
+          )}
         </div>
       </div>
+
+      {/* PENDING CASHIER STOCK REQUESTS REVIEW BANNER */}
+      {pendingStockRequests.length > 0 && activeTab !== 'requests' && (
+        <div className="bg-amber-50/90 border border-amber-300/90 rounded-2xl p-3.5 sm:p-4 shadow-xs shrink-0 animate-in fade-in slide-in-from-top-2">
+          <div className="flex items-center justify-between gap-3 mb-2.5">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
+              <span className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-700" />
+                <span>Pending Staff Stock Requests ({pendingStockRequests.length} waiting authorization)</span>
+              </span>
+            </div>
+            <span className="text-[10px] font-bold text-amber-800 hidden sm:inline">
+              Cashiers submitted stock intakes or audit adjustments requiring your review
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
+            {pendingStockRequests.map((req) => (
+              <div
+                key={req.id}
+                className="bg-white rounded-xl border border-amber-200/90 p-3 shadow-2xs flex flex-col justify-between gap-2.5 hover:border-amber-400 transition-all"
+              >
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase border ${
+                        req.type === 'STOCK_DELIVERY'
+                          ? 'bg-amber-50 text-amber-900 border-amber-300'
+                          : 'bg-teal-50 text-brand-teal-dark border-teal-200'
+                      }`}
+                    >
+                      {req.type === 'STOCK_DELIVERY' ? 'Goods Delivery' : 'Stock Adjustment'}
+                    </span>
+                    <span className="text-[10px] text-text-muted font-bold">
+                      {format(new Date(req.createdAt), 'hh:mm a')}
+                    </span>
+                  </div>
+
+                  <div className="text-xs font-black text-brand-brown-deep">
+                    {req.ingredientName}
+                  </div>
+
+                  <div className="text-[11px] font-bold text-brand-teal flex items-center gap-1.5 flex-wrap">
+                    {req.type === 'STOCK_ADJUSTMENT' ? (
+                      <span>
+                        Current:{' '}
+                        <span className="text-text-muted font-normal">
+                          {req.currentStock} {req.unit}
+                        </span>{' '}
+                        → Requested:{' '}
+                        <span className="text-brand-brown-deep font-black">
+                          {req.requestedStock} {req.unit}
+                        </span>{' '}
+                        <span className={req.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'}>
+                          ({req.quantityChange >= 0 ? `+${req.quantityChange}` : req.quantityChange} {req.unit})
+                        </span>
+                      </span>
+                    ) : req.items && req.items.length > 0 ? (
+                      <div className="space-y-1 w-full">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-status-success font-black">
+                            {req.items.length} Received Line Items
+                          </span>
+                          <span className="font-mono font-black text-brand-brown-deep">
+                            {formatLKR(req.totalCents || req.costCents || 0)}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-text-muted font-medium bg-amber-50/60 p-1.5 rounded-lg border border-amber-200/50 space-y-0.5">
+                          {req.items.slice(0, 3).map((it, i) => (
+                            <div key={i} className="flex justify-between">
+                              <span className="truncate max-w-[180px]">• {it.ingredientName}</span>
+                              <span className="font-mono font-bold">{it.quantity} {it.unit}</span>
+                            </div>
+                          ))}
+                          {req.items.length > 3 && (
+                            <div className="text-[9px] text-brand-teal font-bold pt-0.5">
+                              +{req.items.length - 3} more items...
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <span>
+                        Intake Quantity:{' '}
+                        <span className="text-status-success font-black">
+                          +{req.quantityChange} {req.unit}
+                        </span>
+                        {req.costCents ? ` • Cost: ${formatLKR(req.costCents)}` : ''}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="text-[10px] text-text-secondary bg-cream-50 p-1.5 rounded-lg border border-border/60">
+                    <span className="font-bold text-brand-brown-dark">{req.requestedByUserName}:</span> {req.reason}
+                    {req.supplierName && <span> • Supplier: {req.supplierName}</span>}
+                    {req.invoiceNumber && <span> (Inv: {req.invoiceNumber})</span>}
+                    {req.paymentStatus && (
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded bg-white border border-border text-[9px] font-black uppercase text-brand-brown-dark">
+                        {req.paymentStatus === 'PAID' ? 'Fully Paid' : req.paymentStatus === 'PARTIAL' ? 'Partial' : 'Credit / Unpaid'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-amber-100 flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleRejectStockRequest(req)}
+                    className="px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-bold transition-all cursor-pointer"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEditRequestModal(req)}
+                    className="px-2.5 py-1 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1"
+                  >
+                    <Edit2 className="w-3 h-3" />
+                    <span>Edit & Approve</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApproveStockRequest(req)}
+                    className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center gap-1"
+                  >
+                    <Check className="w-3 h-3" />
+                    <span>Approve</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 2. TAB 1: INGREDIENTS & STOCK TABLE */}
       {activeTab === 'stock' && (
@@ -1201,9 +1576,198 @@ export const AdminInventoryPage: React.FC = () => {
         </div>
       )}
 
+      {/* 4. TAB 4: CASHIER REQUESTS TABLE */}
+      {activeTab === 'requests' && (
+        <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
+          <div className="flex-1 overflow-auto min-h-0 pb-24">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-xs">
+                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
+                  <th className="py-3 px-3.5 bg-[#FAF7F2]/95">Request #</th>
+                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Timestamp</th>
+                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Staff / Cashier</th>
+                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Type</th>
+                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Ingredient / Items</th>
+                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Quantity / Valuation</th>
+                  <th className="py-3 px-3.5 bg-[#FAF7F2]/95">Justification & Notes</th>
+                  <th className="py-3 px-3 text-center bg-[#FAF7F2]/95">Status</th>
+                  <th className="py-3 px-3.5 text-right bg-[#FAF7F2]/95">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#F2ECE4] font-medium">
+                {filteredRequests.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="text-center py-20 text-text-muted">
+                      <Truck className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
+                      <div className="font-semibold text-xs text-text-secondary">No cashier stock requests found.</div>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredRequests.map((req) => {
+                    const isPending = req.status === 'PENDING_APPROVAL';
+                    const isApproved = req.status === 'APPROVED';
+                    const isRejected = req.status === 'REJECTED';
+                    const isDelivery = req.type === 'STOCK_DELIVERY';
+
+                    return (
+                      <tr
+                        key={req.id}
+                        onClick={() => setViewingRequest(req)}
+                        className={`hover:bg-[#FAF7F2]/90 transition-colors cursor-pointer group ${
+                          isPending ? 'bg-amber-50/40' : ''
+                        }`}
+                      >
+                        <td className="py-3 px-3.5 font-mono font-bold text-brand-teal group-hover:underline">
+                          {req.requestNumber}
+                        </td>
+                        <td className="py-3 px-3 text-text-secondary whitespace-nowrap">
+                          {format(new Date(req.createdAt), 'dd MMM yyyy, hh:mm a')}
+                        </td>
+                        <td className="py-3 px-3 font-bold text-brand-brown-dark">
+                          {req.requestedByUserName}
+                        </td>
+                        <td className="py-3 px-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase border ${
+                              isDelivery
+                                ? 'bg-amber-50 text-amber-900 border-amber-300'
+                                : 'bg-teal-50 text-brand-teal-dark border-teal-200'
+                            }`}
+                          >
+                            {isDelivery ? 'Goods Delivery' : 'Adjustment'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-3 font-black text-brand-brown-deep">
+                          {isDelivery && req.items && req.items.length > 0 ? (
+                            <div>
+                              <div>{req.items.length} Line Items</div>
+                              <div className="text-[10px] font-normal text-text-muted truncate max-w-[180px]">
+                                {req.items.map((i) => i.ingredientName).join(', ')}
+                              </div>
+                            </div>
+                          ) : (
+                            req.ingredientName
+                          )}
+                        </td>
+                        <td className="py-3 px-3 font-black tabular-nums">
+                          {req.type === 'STOCK_ADJUSTMENT' ? (
+                            <span>
+                              {req.requestedStock} {req.unit}{' '}
+                              <span className="text-[10px] font-bold text-text-muted">
+                                ({req.quantityChange >= 0 ? `+${req.quantityChange}` : req.quantityChange} {req.unit})
+                              </span>
+                            </span>
+                          ) : (
+                            <div>
+                              <span className="text-status-success font-black">
+                                +{req.quantityChange} {req.unit}
+                              </span>
+                              {(req.totalCents || req.costCents) && (
+                                <div className="text-[10px] font-mono text-brand-brown-dark">
+                                  {formatLKR(req.totalCents || req.costCents || 0)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3.5 text-text-secondary max-w-xs">
+                          <div className="truncate font-medium">{req.reason}</div>
+                          {req.supplierName && (
+                            <div className="text-[10px] text-text-muted">
+                              Supplier: {req.supplierName} • Inv: {req.invoiceNumber || 'N/A'}
+                            </div>
+                          )}
+                          {req.rejectionReason && (
+                            <div className="text-[10px] text-rose-600 font-bold mt-0.5">
+                              Reason: {req.rejectionReason}
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-3 px-3 text-center">
+                          {isPending && (
+                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-amber-100 text-amber-800 border border-amber-300 inline-flex items-center gap-1.5 animate-pulse">
+                              <Clock className="w-3 h-3 text-amber-700" />
+                              <span>Waiting Review</span>
+                            </span>
+                          )}
+                          {isApproved && (
+                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-teal-50 text-brand-teal-dark border border-teal-200 inline-flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3 h-3 text-status-success" />
+                              <span>Approved</span>
+                            </span>
+                          )}
+                          {isRejected && (
+                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-rose-50 text-rose-700 border border-rose-200 inline-flex items-center gap-1.5">
+                              <XCircle className="w-3 h-3 text-rose-600" />
+                              <span>Rejected</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-3.5 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setViewingRequest(req);
+                              }}
+                              className="px-2.5 py-1 rounded-full bg-cream-50 hover:bg-cream-200 border border-[#E0D7CC] text-brand-brown-dark font-bold text-xs inline-flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5 text-brand-teal" />
+                              <span>View</span>
+                            </button>
+
+                            {isPending && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRejectStockRequest(req);
+                                  }}
+                                  className="px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold text-xs transition-all active:scale-95 cursor-pointer"
+                                  title="Reject Request"
+                                >
+                                  Reject
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleApproveStockRequest(req);
+                                  }}
+                                  className="px-3 py-1 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-xs transition-all active:scale-95 cursor-pointer inline-flex items-center gap-1"
+                                  title="Approve and update stock"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Approve</span>
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+                {filteredRequests.length > 0 && (
+                  <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
+                    <td colSpan={9} className="h-20 bg-transparent border-0" />
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* 5. FLOATING SEARCH & ACTION CAPSULE (Centered in Workspace, Above Footer) */}
       <div className="absolute bottom-2.5 left-1/2 -translate-x-1/2 z-30 flex items-center justify-center pointer-events-none select-none max-w-[calc(100%-2rem)]">
-        <div className="bg-[#1E1917]/95 text-white backdrop-blur-xl border border-white/10 shadow-2xl rounded-full p-1.5 pl-4 pr-1.5 flex items-center gap-2 transition-all duration-300 pointer-events-auto">
+        <div
+          className={`bg-[#1E1917]/95 text-white backdrop-blur-xl border border-white/10 shadow-2xl rounded-full h-[52px] flex items-center gap-2.5 transition-all duration-300 pointer-events-auto ${
+            activeTab === 'requests' ? 'px-4 sm:px-5' : 'p-1.5 pl-4 pr-1.5'
+          }`}
+        >
           {/* Search Bar */}
           <div className="flex items-center gap-2 min-w-0">
             <Search className="w-4 h-4 text-white/50 shrink-0 pointer-events-none" />
@@ -1214,20 +1778,26 @@ export const AdminInventoryPage: React.FC = () => {
                   ? 'Search ingredients, SKU...'
                   : activeTab === 'movements'
                   ? 'Search movements, reasons...'
-                  : 'Search POs, vendors...'
+                  : activeTab === 'purchases'
+                  ? 'Search POs, vendors...'
+                  : 'Search requests, cashiers, items...'
               }
               value={search}
               onFocus={() => setIsSearchFocused(true)}
               onBlur={() => setIsSearchFocused(false)}
               onChange={(e) => setSearch(e.target.value)}
               className={`bg-transparent border-0 border-none outline-none focus:outline-none focus:ring-0 text-xs font-semibold text-white placeholder:text-white/40 shadow-none transition-all duration-300 ease-out ${
-                isSearchFocused || search ? 'w-44 sm:w-64 md:w-80' : 'w-24 sm:w-36'
+                isSearchFocused || search
+                  ? 'w-56 sm:w-72 md:w-80'
+                  : activeTab === 'requests'
+                  ? 'w-48 sm:w-56'
+                  : 'w-36 sm:w-44'
               }`}
             />
             {search && (
               <button
                 onClick={() => setSearch('')}
-                className="p-1 rounded-full text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0"
+                className="p-1 rounded-full text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 cursor-pointer"
                 title="Clear search"
               >
                 <X className="w-3.5 h-3.5" />
@@ -1239,7 +1809,7 @@ export const AdminInventoryPage: React.FC = () => {
           {activeTab === 'stock' && (
             <button
               onClick={handleOpenAddIngredient}
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
+              className="w-10 h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
               title="Add New Ingredient"
             >
               <Plus className="w-5 h-5 stroke-[2.5] group-hover:rotate-90 transition-transform duration-200" />
@@ -1249,7 +1819,7 @@ export const AdminInventoryPage: React.FC = () => {
           {activeTab === 'movements' && (
             <button
               onClick={() => handleOpenAdjustModal()}
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
+              className="w-10 h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
               title="Record Stock Adjustment"
             >
               <Plus className="w-5 h-5 stroke-[2.5] group-hover:rotate-90 transition-transform duration-200" />
@@ -1259,7 +1829,7 @@ export const AdminInventoryPage: React.FC = () => {
           {activeTab === 'purchases' && (
             <button
               onClick={handleOpenReceiveModal}
-              className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
+              className="w-10 h-10 rounded-full bg-[#E99343] hover:bg-[#DE7E29] text-white flex items-center justify-center shadow-lg shadow-[#E99343]/30 active:scale-95 transition-all shrink-0 cursor-pointer group"
               title="Receive Stock / Purchase Order"
             >
               <Plus className="w-5 h-5 stroke-[2.5] group-hover:rotate-90 transition-transform duration-200" />
@@ -2033,18 +2603,34 @@ export const AdminInventoryPage: React.FC = () => {
                     <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
                       Raw Ingredient <span className="text-status-danger">*</span>
                     </label>
-                    <select
-                      value={adjustIngredientId}
-                      onChange={(e) => setAdjustIngredientId(e.target.value)}
-                      className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
-                      required
-                    >
-                      {ingredients.map((ing) => (
-                        <option key={ing.id} value={ing.id}>
-                          {ing.name} (Current: {ing.currentStock} {ing.unit})
-                        </option>
-                      ))}
-                    </select>
+                    {isSpecificIngredientAdjust && selectedAdjustIng ? (
+                      <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span>{selectedAdjustIng.name}</span>
+                          {selectedAdjustIng.sku && (
+                            <span className="text-[10px] font-mono font-semibold text-text-muted bg-cream-100 px-1.5 py-0.5 rounded">
+                              {selectedAdjustIng.sku}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-bold text-brand-teal">
+                          Current: {selectedAdjustIng.currentStock} {selectedAdjustIng.unit}
+                        </span>
+                      </div>
+                    ) : (
+                      <select
+                        value={adjustIngredientId}
+                        onChange={(e) => setAdjustIngredientId(e.target.value)}
+                        className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
+                        required
+                      >
+                        {ingredients.map((ing) => (
+                          <option key={ing.id} value={ing.id}>
+                            {ing.name} (Current: {ing.currentStock} {ing.unit})
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
 
                   <div>
@@ -2660,6 +3246,587 @@ export const AdminInventoryPage: React.FC = () => {
           document.body
         );
       })()}
+
+      {/* ========================================================================= */}
+      {/* 10. MODAL: VIEW CASHIER STOCK REQUEST DETAILS (3-COLUMN STUDIO CARD PATTERN)*/}
+      {/* ========================================================================= */}
+      {viewingRequest && (() => {
+        const isPending = viewingRequest.status === 'PENDING_APPROVAL';
+        const isApproved = viewingRequest.status === 'APPROVED';
+        const isRejected = viewingRequest.status === 'REJECTED';
+        const isDelivery = viewingRequest.type === 'STOCK_DELIVERY';
+
+        const totalCostCents = viewingRequest.totalCents || viewingRequest.costCents || 0;
+        const effectivePaidCents = viewingRequest.paidCents ?? (isApproved && viewingRequest.paymentStatus === 'PAID' ? totalCostCents : 0);
+        const effectiveDueCents = viewingRequest.dueCents ?? Math.max(0, totalCostCents - effectivePaidCents);
+        const effectiveOverpaidCents = Math.max(0, effectivePaidCents - totalCostCents);
+        const isPaid = viewingRequest.paymentStatus === 'PAID' || (effectivePaidCents >= totalCostCents && totalCostCents > 0);
+
+        // Extract payment breakdown
+        const cashPaidCents =
+          viewingRequest.payments?.filter((p) => p.method === 'CASH').reduce((s, p) => s + p.amountCents, 0) ||
+          (isPaid && (!viewingRequest.payments || viewingRequest.payments.length === 0) ? totalCostCents : 0);
+        const cardPaidCents =
+          viewingRequest.payments?.filter((p) => p.method === 'CARD').reduce((s, p) => s + p.amountCents, 0) || 0;
+        const chequePaidCents =
+          viewingRequest.payments?.filter((p) => p.method === 'CHEQUE').reduce((s, p) => s + p.amountCents, 0) || 0;
+        const chequePayment = viewingRequest.payments?.find((p) => p.method === 'CHEQUE');
+
+        const itemsList: PurchaseItem[] =
+          viewingRequest.items && viewingRequest.items.length > 0
+            ? viewingRequest.items
+            : [
+                {
+                  ingredientId: viewingRequest.ingredientId || '',
+                  ingredientName: viewingRequest.ingredientName,
+                  quantity: viewingRequest.quantityChange || 1,
+                  unit: viewingRequest.unit,
+                  unitPriceCents: Math.round((viewingRequest.costCents || 0) / (viewingRequest.quantityChange || 1)),
+                  totalCents: viewingRequest.costCents || 0,
+                  expiryDate: viewingRequest.expiryDate,
+                },
+              ];
+
+        return createPortal(
+          <div className="fixed inset-0 z-[99999] w-full h-full bg-black/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-3 lg:p-4 overflow-hidden animate-in fade-in">
+            <div className="w-full max-w-[98vw] 2xl:max-w-[1700px] h-[94vh] max-h-[94vh] flex flex-col">
+              {/* 1. Top Header Row above cards */}
+              <div className="flex items-center justify-between gap-3 mb-3 px-1 shrink-0">
+                <div className="min-w-0 flex-1 flex items-center gap-2">
+                  <h3 className="font-extrabold text-base sm:text-lg text-white drop-shadow-xs truncate">
+                    Stock Request {viewingRequest.requestNumber}
+                  </h3>
+                  <span className="text-[11px] font-bold text-white/70 bg-white/10 px-2.5 py-0.5 rounded-full backdrop-blur-xs hidden sm:inline-block shrink-0">
+                    {isDelivery ? 'Goods Inward Voucher' : 'Stock Adjustment Voucher'}
+                  </span>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold border ${
+                      isPending
+                        ? 'bg-amber-400/20 text-amber-300 border-amber-400/40 animate-pulse'
+                        : isApproved
+                        ? 'bg-emerald-400/20 text-emerald-300 border-emerald-400/40'
+                        : 'bg-rose-400/20 text-rose-300 border-rose-400/40'
+                    }`}
+                  >
+                    {isPending ? 'Waiting for Admin' : isApproved ? 'Approved & Recorded' : 'Rejected'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {isPending && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const req = viewingRequest;
+                          setViewingRequest(null);
+                          handleRejectStockRequest(req);
+                        }}
+                        className="px-4 py-2 rounded-full bg-rose-500 hover:bg-rose-600 text-white font-extrabold text-xs shadow-md transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const req = viewingRequest;
+                          setViewingRequest(null);
+                          handleApproveStockRequest(req);
+                        }}
+                        className="px-5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md transition-all active:scale-95 whitespace-nowrap cursor-pointer flex items-center gap-1.5"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Approve & Record Stock</span>
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setViewingRequest(null)}
+                    className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              {/* 2. Main Studio Grid (3 Equal-Height Cards Side-by-Side) */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1 min-h-0 overflow-hidden">
+                {/* ================================================================= */}
+                {/* 1. LEFT CARD: SUPPLIER & REQUEST DETAILS (Col Span 3)             */}
+                {/* ================================================================= */}
+                <div className="lg:col-span-3 xl:col-span-3 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-y-auto space-y-4">
+                  <div className="flex items-center gap-2 pb-2 border-b border-[#EAE3DA] shrink-0">
+                    <div className="w-7 h-7 rounded-xl bg-brand-brown/10 text-brand-brown flex items-center justify-center shrink-0">
+                      <Building2 className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
+                        {isDelivery ? 'Supplier & Invoice Details' : 'Adjustment Details'}
+                      </span>
+                      <span className="text-[10px] text-text-muted leading-none">
+                        Submitted by cashier for review
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Form Fields */}
+                  <div className="space-y-3.5 flex-1">
+                    {isDelivery ? (
+                      <>
+                        <div>
+                          <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
+                            Supplier / Vendor Name
+                          </label>
+                          <div className="w-full pb-1.5 pt-0.5 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark">
+                            {viewingRequest.supplierName || 'General Supplier'}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
+                            Invoice / Bill Ref #
+                          </label>
+                          <div className="flex items-center justify-between border-b border-[#E2D8CC] pb-1.5 pt-0.5">
+                            <span className="text-xs font-mono font-bold text-brand-brown-dark">
+                              {viewingRequest.invoiceNumber || 'N/A'}
+                            </span>
+                            {viewingRequest.invoiceNumber && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(viewingRequest.invoiceNumber || '');
+                                  toast.success(`Copied "${viewingRequest.invoiceNumber}"`);
+                                }}
+                                className="p-1 text-text-muted hover:text-brand-teal transition-colors cursor-pointer"
+                                title="Copy Invoice Ref"
+                              >
+                                <Copy className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div>
+                        <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
+                          Audited Ingredient
+                        </label>
+                        <div className="w-full pb-1.5 pt-0.5 border-b border-[#E2D8CC] text-xs font-black text-brand-brown-dark">
+                          {viewingRequest.ingredientName}
+                        </div>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
+                        Cashier Reason & Note
+                      </label>
+                      <div className="p-2.5 bg-cream-50 rounded-xl border border-[#E0D7CC] text-xs font-medium text-brand-brown-dark italic min-h-[48px]">
+                        "{viewingRequest.reason}"
+                      </div>
+                    </div>
+
+                    {viewingRequest.rejectionReason && (
+                      <div>
+                        <label className="text-[10px] font-bold uppercase text-rose-600 block mb-1">
+                          Admin Rejection Note
+                        </label>
+                        <div className="p-2.5 bg-rose-50 rounded-xl border border-rose-200 text-xs font-medium text-rose-800">
+                          {viewingRequest.rejectionReason}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Logo Section */}
+                    <div className="pt-2 flex flex-col items-center justify-center opacity-85">
+                      <div className="w-14 h-14 rounded-2xl bg-cream-50 border border-[#E0D7CC] flex items-center justify-center text-2xl shadow-xs">
+                        🐼
+                      </div>
+                      <span className="text-[11px] font-black text-brand-brown-deep tracking-wider uppercase mt-1.5">
+                        Chill & Choc
+                      </span>
+                      <span className="text-[9px] font-bold text-text-muted tracking-tight">
+                        Cashier Authorization Request
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Pinned Bottom Metadata Card */}
+                  <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#E2D8CC] space-y-1.5 shrink-0 text-xs mt-auto">
+                    <div className="flex justify-between items-center text-text-secondary">
+                      <span className="text-[10px] font-bold uppercase text-text-muted">Request Date:</span>
+                      <span className="font-mono font-bold text-brand-brown-dark">
+                        {format(new Date(viewingRequest.createdAt), 'dd MMM yyyy, hh:mm a')}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-text-secondary">
+                      <span className="text-[10px] font-bold uppercase text-text-muted">Staff / Cashier:</span>
+                      <span className="font-bold text-brand-teal">{viewingRequest.requestedByUserName}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-text-secondary">
+                      <span className="text-[10px] font-bold uppercase text-text-muted">Review Status:</span>
+                      <span className="font-bold text-brand-brown-dark">
+                        {viewingRequest.resolvedByUserName ? `Reviewed by ${viewingRequest.resolvedByUserName}` : 'Pending Admin'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center text-text-secondary pt-1 border-t border-[#E0D7CC]">
+                      <span className="text-[10px] font-bold uppercase text-text-muted">Total Line Items:</span>
+                      <span className="font-black text-brand-brown-dark">{itemsList.length} items</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* ================================================================= */}
+                {/* 2. MIDDLE CARD: RECEIVED LINE ITEMS (Col Span 5)                  */}
+                {/* ================================================================= */}
+                <div className="lg:col-span-5 xl:col-span-5 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-hidden">
+                  <div className="flex items-center justify-between pb-2 border-b border-[#EAE3DA] shrink-0">
+                    <div className="flex items-center gap-2">
+                      <div className="w-7 h-7 rounded-xl bg-brand-teal/10 text-brand-teal flex items-center justify-center shrink-0">
+                        <Package className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
+                          {isDelivery ? 'Proposed Delivery Line Items' : 'Stock Adjustment Breakdown'}
+                        </span>
+                        <span className="text-[10px] text-text-muted leading-none">
+                          {isDelivery ? 'Itemized delivery items awaiting inventory update' : 'Proposed physical count changes'}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-extrabold text-brand-teal bg-teal-50 border border-teal-200/80 px-2.5 py-0.5 rounded-full">
+                      {itemsList.length} {itemsList.length === 1 ? 'item' : 'items'}
+                    </span>
+                  </div>
+
+                  {/* Items List */}
+                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 py-3 min-h-0">
+                    {isDelivery ? (
+                      itemsList.map((item, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 sm:p-3.5 bg-[#FAF7F2] hover:bg-cream-100/70 border border-[#E8DFC8] rounded-2xl transition-all space-y-1.5"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <span className="font-extrabold text-xs sm:text-sm text-brand-brown-deep block leading-tight truncate">
+                                {item.ingredientName}
+                              </span>
+                              <div className="text-[11px] font-bold text-text-muted mt-0.5">
+                                {item.quantity} {item.unit} @ {formatLKR(item.unitPriceCents)}/{item.unit}
+                              </div>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <span className="text-xs sm:text-sm font-black text-brand-brown-dark font-mono block">
+                                {formatLKR(item.totalCents)}
+                              </span>
+                              <span className="inline-block px-2 py-0.2 text-[9px] font-black uppercase tracking-wider rounded-md bg-white border border-[#E2D8CC] text-brand-teal mt-0.5">
+                                {item.unit}
+                              </span>
+                            </div>
+                          </div>
+                          {item.expiryDate && (
+                            <div className="text-[10px] font-medium text-amber-800 bg-amber-50/80 border border-amber-200/80 rounded-lg px-2 py-0.5 inline-flex items-center gap-1">
+                              <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                              <span>Exp: {item.expiryDate}</span>
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="p-4 bg-[#FAF7F2] border border-[#E8DFC8] rounded-2xl space-y-3">
+                        <div className="text-sm font-black text-brand-brown-deep">
+                          {viewingRequest.ingredientName}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 text-center">
+                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
+                            <div className="text-[10px] font-bold uppercase text-text-muted">Previous</div>
+                            <div className="text-xs font-black text-text-secondary mt-0.5">
+                              {viewingRequest.currentStock} {viewingRequest.unit}
+                            </div>
+                          </div>
+                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
+                            <div className="text-[10px] font-bold uppercase text-brand-teal">Requested</div>
+                            <div className="text-xs font-black text-brand-brown-deep mt-0.5">
+                              {viewingRequest.requestedStock} {viewingRequest.unit}
+                            </div>
+                          </div>
+                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
+                            <div className="text-[10px] font-bold uppercase text-text-muted">Net Change</div>
+                            <div
+                              className={`text-xs font-black mt-0.5 ${
+                                viewingRequest.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'
+                              }`}
+                            >
+                              {viewingRequest.quantityChange >= 0
+                                ? `+${viewingRequest.quantityChange}`
+                                : viewingRequest.quantityChange}{' '}
+                              {viewingRequest.unit}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* ================================================================= */}
+                {/* 3. RIGHT CARD: PAYMENT SETTLEMENT & SUMMARY (Col Span 4)          */}
+                {/* ================================================================= */}
+                <div className="lg:col-span-4 xl:col-span-4 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-hidden">
+                  <div className="flex items-center gap-2 pb-2 border-b border-[#EAE3DA] shrink-0">
+                    <div className="w-7 h-7 rounded-xl bg-amber-500/10 text-amber-700 flex items-center justify-center shrink-0">
+                      <Banknote className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
+                        Payment Settlement
+                      </span>
+                      <span className="text-[10px] text-text-muted leading-none">
+                        Cashier submitted payment records
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Paid Records Section */}
+                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 py-3 min-h-0">
+                    <div className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
+                      Payment Breakdown:
+                    </div>
+
+                    {cashPaidCents > 0 && (
+                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
+                        <div className="flex items-center gap-2">
+                          <Banknote className="w-4 h-4 text-emerald-600" />
+                          <span className="font-black text-brand-brown-deep">Cash Payment</span>
+                        </div>
+                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(cashPaidCents)}</span>
+                      </div>
+                    )}
+
+                    {cardPaidCents > 0 && (
+                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
+                        <div className="flex items-center gap-2">
+                          <CreditCard className="w-4 h-4 text-brand-teal" />
+                          <span className="font-black text-brand-brown-deep">Card / Digital</span>
+                        </div>
+                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(cardPaidCents)}</span>
+                      </div>
+                    )}
+
+                    {chequePaidCents > 0 && (
+                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
+                        <div className="flex items-center gap-2">
+                          <Landmark className="w-4 h-4 text-amber-700" />
+                          <span className="font-black text-brand-brown-deep">Cheque Payment</span>
+                        </div>
+                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(chequePaidCents)}</span>
+                      </div>
+                    )}
+
+                    {cashPaidCents === 0 && cardPaidCents === 0 && chequePaidCents === 0 && (
+                      <div className="p-3 bg-cream-50 rounded-xl border border-[#E0D7CC] text-xs text-text-muted text-center italic">
+                        {isDelivery ? 'No upfront payment recorded (Full Supplier Credit)' : 'Audit request (No direct invoice payment)'}
+                      </div>
+                    )}
+
+                    {/* Cheque realization card */}
+                    {chequePayment && (
+                      <div className="p-3 bg-amber-50/90 rounded-xl border border-amber-300/80 text-xs space-y-1 mt-2">
+                        <div className="font-extrabold text-amber-950 flex items-center gap-1.5">
+                          <Landmark className="w-3.5 h-3.5 text-amber-700" />
+                          <span>Cheque Details:</span>
+                        </div>
+                        <div className="text-[11px] text-amber-900">
+                          Ref / Check #: <span className="font-mono font-bold">{chequePayment.chequeNumber || 'N/A'}</span>
+                        </div>
+                        <div className="text-[11px] text-amber-900">
+                          Bank: <span className="font-bold">{chequePayment.bankName || 'Commercial Bank'}</span>
+                        </div>
+                        {chequePayment.chequeDate && (
+                          <div className="text-[11px] text-amber-900">
+                            Realize Date: <span className="font-mono font-bold">{chequePayment.chequeDate}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Pinned Bottom Financial Settlement Summary Card */}
+                  <div className="p-3.5 bg-[#FAF7F2] rounded-2xl border border-[#E2D8CC] space-y-2 shrink-0 text-xs mt-auto">
+                    <div className="flex justify-between items-center text-text-secondary">
+                      <span>Total Invoiced:</span>
+                      <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(totalCostCents)}</span>
+                    </div>
+                    <div className="flex justify-between items-center font-bold text-brand-teal">
+                      <span>Total Paid:</span>
+                      <span className="font-mono">{formatLKR(effectivePaidCents)}</span>
+                    </div>
+                    {effectiveDueCents > 0 && (
+                      <>
+                        <div className="flex justify-between items-center font-bold text-rose-600 pt-1.5 border-t border-[#E0D7CC]">
+                          <span>Remaining Due (Credit):</span>
+                          <span className="font-mono text-sm">{formatLKR(effectiveDueCents)}</span>
+                        </div>
+                        <div className="flex justify-between items-center text-[11px] text-text-secondary">
+                          <span className="font-bold uppercase text-[10px] text-text-muted">Due Date / Deadline:</span>
+                          <span className="font-mono font-bold text-rose-900 bg-white border border-[#E2D8CC] px-2 py-0.5 rounded-lg text-[11px]">
+                            {viewingRequest.duePaymentDate || 'Pending Schedule'}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                    {effectiveOverpaidCents > 0 && (
+                      <div className="flex justify-between items-center font-bold text-amber-900 bg-amber-100/90 border border-amber-300/80 px-2.5 py-1.5 rounded-xl text-[11px]">
+                        <span className="flex items-center gap-1">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                          <span>Overpaid Excess:</span>
+                        </span>
+                        <span className="font-mono text-xs font-black text-amber-900">
+                          +{formatLKR(effectiveOverpaidCents)}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="pt-1.5 text-center">
+                      <span
+                        className={`inline-flex items-center justify-center w-full gap-1 py-1 rounded-xl font-black text-[11px] uppercase border ${
+                          isPending
+                            ? 'bg-amber-100 text-amber-900 border-amber-300'
+                            : isApproved
+                            ? 'bg-status-success-bg text-status-success border-status-success/30'
+                            : 'bg-rose-50 text-rose-700 border-rose-200'
+                        }`}
+                      >
+                        {isPending ? (
+                          <>
+                            <Clock className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Waiting Authorization</span>
+                          </>
+                        ) : isApproved ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Approved & Recorded</span>
+                          </>
+                        ) : (
+                          <>
+                            <XCircle className="w-3.5 h-3.5" />
+                            <span>Rejected by Admin</span>
+                          </>
+                        )}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body
+        );
+      })()}
+
+      {/* 5. MODAL: EDIT & APPROVE STOCK REQUEST */}
+      {editingRequest &&
+        createPortal(
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
+            <div className="bg-white w-full max-w-md rounded-3xl border border-[#E9E0D5] shadow-2xl p-6 space-y-4">
+              <div className="flex items-center justify-between pb-3 border-b border-[#EAE3DA]">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-800">
+                    <Edit2 className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-brand-brown-deep">Modify & Authorize Request</h3>
+                    <p className="text-xs text-text-muted">Adjust quantity/cost before approving into inventory</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingRequest(null)}
+                  className="w-8 h-8 rounded-full bg-cream-50 hover:bg-cream-100 flex items-center justify-center text-text-muted hover:text-brand-brown-dark transition-all cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveAndApproveRequest} className="space-y-3.5">
+                {/* Item Details */}
+                <div className="p-3 bg-cream-50 rounded-2xl border border-border/60">
+                  <div className="text-xs font-black text-brand-brown-deep">{editingRequest.ingredientName}</div>
+                  <div className="text-[10px] text-text-secondary mt-0.5">
+                    Requested by <span className="font-bold">{editingRequest.requestedByUserName}</span> ({editingRequest.type === 'STOCK_DELIVERY' ? 'Goods Delivery' : 'Adjustment'})
+                  </div>
+                  <div className="text-[10px] text-text-muted mt-1 italic">
+                    "{editingRequest.reason}"
+                  </div>
+                </div>
+
+                {/* Quantity */}
+                <div>
+                  <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
+                    {editingRequest.type === 'STOCK_ADJUSTMENT' ? `Final Adjusted Stock (${editingRequest.unit})` : `Delivered Quantity (${editingRequest.unit})`}
+                  </label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editRequestQty}
+                    onChange={(e) => setEditRequestQty(e.target.value)}
+                    required
+                    className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-sm font-black text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
+                  />
+                </div>
+
+                {/* Cost (For deliveries) */}
+                {editingRequest.type === 'STOCK_DELIVERY' && (
+                  <div>
+                    <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
+                      Total Invoice Cost (Rs.)
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      value={editRequestCost}
+                      onChange={(e) => setEditRequestCost(e.target.value)}
+                      placeholder="e.g. 5000.00"
+                      className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-xs font-bold text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
+                    />
+                  </div>
+                )}
+
+                {/* Expiry Date */}
+                <div>
+                  <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
+                    Expiry Date
+                  </label>
+                  <input
+                    type="date"
+                    value={editRequestExpiry}
+                    onChange={(e) => setEditRequestExpiry(e.target.value)}
+                    className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-xs font-medium text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
+                  />
+                </div>
+
+                <div className="pt-3 border-t border-[#EAE3DA] flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingRequest(null)}
+                    className="px-4 py-2 rounded-xl border border-[#E0D7CC] bg-white text-xs font-bold text-text-secondary hover:bg-cream-50 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Approve Changes</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

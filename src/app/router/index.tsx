@@ -7,6 +7,7 @@ import { AdminLayout } from '@/features/admin/layouts/AdminLayout';
 // POS Pages
 import { PosLoginPage } from '@/features/pos/pages/PosLoginPage';
 import { PosMainPage } from '@/features/pos/pages/PosMainPage';
+import { PosStockPage } from '@/features/pos/pages/PosStockPage';
 import { CloseShiftPage } from '@/features/pos/pages/CloseShiftPage';
 
 // Admin Pages
@@ -45,6 +46,10 @@ export const router = createBrowserRouter([
   {
     path: '/pos',
     element: <PosMainPage />,
+  },
+  {
+    path: '/pos/stock',
+    element: <PosStockPage />,
   },
   {
     path: '/pos/close-shift',

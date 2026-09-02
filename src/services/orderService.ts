@@ -3,6 +3,7 @@ import { cashDrawerService } from './cashDrawerService';
 import { inventoryService } from './inventoryService';
 import { printerService } from './printerService';
 import { realtimeSocketService } from './realtimeSocketService';
+import { customerService } from './customerService';
 import { Order, OrderItem, PaymentMethod, PaymentSplit, OrderType, HeldOrder } from '@/types';
 import { formatOrderNumber } from '@/utils/format';
 
@@ -13,8 +14,12 @@ export interface CreateOrderInput {
   terminalId: string;
   orderType: OrderType;
   tableNumber?: string;
+  customerId?: string;
   customerName?: string;
   customerPhone?: string;
+  loyaltyPointsEarned?: number;
+  loyaltyPointsRedeemed?: number;
+  loyaltyDiscountCents?: number;
   items: OrderItem[];
   subtotalCents: number;
   discountCents: number;
@@ -138,6 +143,32 @@ export const orderService = {
     const orderNumber = formatOrderNumber(currentNum);
     const orderId = `ord_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
     const now = new Date().toISOString();
+    const settings = db.getSnapshot().settings;
+    let earnedPoints = 0;
+    const redeemedPoints = input.loyaltyPointsRedeemed || 0;
+
+    const custPhone = input.customerPhone?.trim();
+    const custId = input.customerId;
+
+    const targetCustomer = custId
+      ? customerService.getCustomerById(custId)
+      : custPhone
+      ? customerService.getCustomerByPhone(custPhone)
+      : undefined;
+
+    // Calculate earned points if customer attached, program active, AND NOT redeeming points
+    // Points are only earned when cashier chooses Continue (no points redeemed on the order)
+    if (
+      targetCustomer &&
+      redeemedPoints === 0 &&
+      (settings.loyaltyProgramEnabled ?? true) &&
+      input.totalCents >= (settings.loyaltyMinSpendToEarnCents || 0)
+    ) {
+      const spendPerPt = settings.loyaltySpendPerPointCents || 10000;
+      if (spendPerPt > 0) {
+        earnedPoints = Math.floor(input.totalCents / spendPerPt);
+      }
+    }
 
     const order: Order = {
       id: orderId,
@@ -149,8 +180,12 @@ export const orderService = {
       terminalId: input.terminalId,
       orderType: input.orderType,
       tableNumber: input.tableNumber,
-      customerName: input.customerName,
-      customerPhone: input.customerPhone,
+      customerId: targetCustomer?.id || input.customerId,
+      customerName: targetCustomer?.name || input.customerName,
+      customerPhone: targetCustomer?.phone || input.customerPhone,
+      loyaltyPointsEarned: earnedPoints,
+      loyaltyPointsRedeemed: redeemedPoints,
+      loyaltyDiscountCents: input.loyaltyDiscountCents || 0,
       status: 'COMPLETED',
       items: input.items,
       subtotalCents: input.subtotalCents,
@@ -178,6 +213,42 @@ export const orderService = {
       draft.orders.unshift(order);
       draft.nextOrderNumber = currentNum + 1;
     });
+
+    // Execute Customer Ledger updates
+    if (targetCustomer) {
+      if (redeemedPoints > 0) {
+        customerService.redeemPoints(
+          targetCustomer.id,
+          redeemedPoints,
+          `Redeemed ${redeemedPoints} points for discount on ${orderNumber}`,
+          orderId,
+          orderNumber
+        );
+      }
+      if (earnedPoints > 0) {
+        customerService.addPoints(
+          targetCustomer.id,
+          earnedPoints,
+          `Earned ${earnedPoints} points from order ${orderNumber}`,
+          orderId,
+          orderNumber
+        );
+      }
+
+      // Update customer aggregates & last visit
+      db.update('customers', (prev) =>
+        (prev || []).map((c) =>
+          c.id === targetCustomer!.id
+            ? {
+                ...c,
+                totalSpentCents: (c.totalSpentCents || 0) + order.totalCents,
+                totalOrders: (c.totalOrders || 0) + 1,
+                lastVisit: now,
+              }
+            : c
+        )
+      );
+    }
 
     // 1. Deduct ingredient stock based on recipes
     inventoryService.deductRecipeStockForOrder(order.items, order.orderNumber);
@@ -267,6 +338,193 @@ export const orderService = {
     return order;
   },
 
+  /**
+   * Cashier submits a Refund Request to Admin for authorization.
+   * Order status transitions to REFUND_PENDING and waits for Admin approval.
+   */
+  requestRefund: async (params: {
+    orderId: string;
+    reason: string;
+    refundAmountCents?: number;
+    userId: string;
+    userName: string;
+  }): Promise<Order> => {
+    const order = orderService.getOrderById(params.orderId);
+    if (!order) throw new Error('Order not found');
+
+    const refundAmount = params.refundAmountCents || order.totalCents;
+
+    const updatedOrder: Order = {
+      ...order,
+      status: 'REFUND_PENDING',
+      refundStatus: 'PENDING_APPROVAL',
+      refundReason: params.reason,
+      refundedAmountCents: refundAmount,
+      refundRequest: {
+        requestedByUserId: params.userId,
+        requestedByUserName: params.userName,
+        requestedAt: new Date().toISOString(),
+        reason: params.reason,
+        amountCents: refundAmount,
+      },
+    };
+
+    db.update('orders', (orders) =>
+      orders.map((o) => (o.id === order.id ? updatedOrder : o))
+    );
+
+    // Log audit
+    db.update('auditLogs', (logs) => [
+      {
+        id: `aud_${Date.now()}`,
+        userId: params.userId,
+        userName: params.userName,
+        action: 'REFUND',
+        entity: 'Order',
+        entityId: order.id,
+        details: `Cashier ${params.userName} submitted refund request for ${order.orderNumber} (Rs. ${(refundAmount / 100).toFixed(2)}). Reason: ${params.reason}`,
+        terminalId: order.terminalId,
+        timestamp: new Date().toISOString(),
+      },
+      ...logs,
+    ]);
+
+    // Emit Realtime WebSocket Events
+    realtimeSocketService.emitOrderRefundRequested(updatedOrder);
+    realtimeSocketService.emitOrderUpdated(updatedOrder);
+
+    return updatedOrder;
+  },
+
+  /**
+   * Admin approves and confirms the Refund Request.
+   * Drawer transaction is recorded, stock returned, and order marked REFUNDED.
+   */
+  approveRefund: async (params: {
+    orderId: string;
+    adminId: string;
+    adminName: string;
+    notes?: string;
+  }): Promise<Order> => {
+    const order = orderService.getOrderById(params.orderId);
+    if (!order) throw new Error('Order not found');
+
+    const refundAmount = order.refundedAmountCents || order.refundRequest?.amountCents || order.totalCents;
+    const isFullRefund = refundAmount >= order.totalCents;
+    const newStatus = isFullRefund ? 'REFUNDED' : 'PARTIALLY_REFUNDED';
+    const reason = order.refundReason || order.refundRequest?.reason || 'Admin Approved Refund';
+
+    const updatedOrder: Order = {
+      ...order,
+      status: newStatus,
+      refundStatus: 'APPROVED',
+      refundedAmountCents: refundAmount,
+      refundReason: reason,
+      refundApproval: {
+        approvedByUserId: params.adminId,
+        approvedByUserName: params.adminName,
+        approvedAt: new Date().toISOString(),
+        notes: params.notes,
+      },
+    };
+
+    db.update('orders', (orders) =>
+      orders.map((o) => (o.id === order.id ? updatedOrder : o))
+    );
+
+    // If order was paid by cash, record negative movement in cash drawer
+    if (order.paymentMethod === 'CASH' || (order.paymentMethod === 'SPLIT' && order.paymentSplits?.some((p) => p.method === 'CASH'))) {
+      cashDrawerService.addTransaction({
+        shiftId: order.shiftId,
+        terminalId: order.terminalId,
+        cashierId: params.adminId,
+        cashierName: params.adminName,
+        type: 'CASH_REFUND',
+        amount: -refundAmount,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        reason: `Approved Refund for ${order.orderNumber}: ${reason}`,
+      });
+    }
+
+    // Return ingredients to inventory
+    inventoryService.returnRecipeStockForRefund(order.items, order.orderNumber, reason);
+
+    // Log audit
+    db.update('auditLogs', (logs) => [
+      {
+        id: `aud_${Date.now()}`,
+        userId: params.adminId,
+        userName: params.adminName,
+        action: 'REFUND',
+        entity: 'Order',
+        entityId: order.id,
+        details: `Admin ${params.adminName} approved refund for ${order.orderNumber} (Rs. ${(refundAmount / 100).toFixed(2)}).`,
+        terminalId: order.terminalId,
+        timestamp: new Date().toISOString(),
+      },
+      ...logs,
+    ]);
+
+    // Emit Realtime WebSocket Events
+    realtimeSocketService.emitOrderRefunded(updatedOrder);
+    realtimeSocketService.emitOrderUpdated(updatedOrder);
+
+    return updatedOrder;
+  },
+
+  /**
+   * Admin rejects the Refund Request.
+   * Order status is restored to COMPLETED.
+   */
+  rejectRefund: async (params: {
+    orderId: string;
+    adminId: string;
+    adminName: string;
+    rejectionReason?: string;
+  }): Promise<Order> => {
+    const order = orderService.getOrderById(params.orderId);
+    if (!order) throw new Error('Order not found');
+
+    const updatedOrder: Order = {
+      ...order,
+      status: 'COMPLETED',
+      refundStatus: 'REJECTED',
+      refundRejection: {
+        rejectedByUserId: params.adminId,
+        rejectedByUserName: params.adminName,
+        rejectedAt: new Date().toISOString(),
+        rejectionReason: params.rejectionReason,
+      },
+    };
+
+    db.update('orders', (orders) =>
+      orders.map((o) => (o.id === order.id ? updatedOrder : o))
+    );
+
+    // Log audit
+    db.update('auditLogs', (logs) => [
+      {
+        id: `aud_${Date.now()}`,
+        userId: params.adminId,
+        userName: params.adminName,
+        action: 'REFUND',
+        entity: 'Order',
+        entityId: order.id,
+        details: `Admin ${params.adminName} rejected refund request for ${order.orderNumber}. Reason: ${params.rejectionReason || 'No reason provided'}`,
+        terminalId: order.terminalId,
+        timestamp: new Date().toISOString(),
+      },
+      ...logs,
+    ]);
+
+    // Emit Realtime WebSocket Events
+    realtimeSocketService.emitOrderRefundRejected(updatedOrder);
+    realtimeSocketService.emitOrderUpdated(updatedOrder);
+
+    return updatedOrder;
+  },
+
   refundOrder: async (params: {
     orderId: string;
     reason: string;
@@ -284,8 +542,14 @@ export const orderService = {
     const updatedOrder: Order = {
       ...order,
       status: newStatus,
+      refundStatus: 'APPROVED',
       refundedAmountCents: refundAmount,
       refundReason: params.reason,
+      refundApproval: {
+        approvedByUserId: params.userId,
+        approvedByUserName: params.userName,
+        approvedAt: new Date().toISOString(),
+      },
     };
 
     db.update('orders', (orders) =>
@@ -328,6 +592,7 @@ export const orderService = {
 
     // Emit Realtime WebSocket Refund Event
     realtimeSocketService.emitOrderRefunded(updatedOrder);
+    realtimeSocketService.emitOrderUpdated(updatedOrder);
 
     return updatedOrder;
   },

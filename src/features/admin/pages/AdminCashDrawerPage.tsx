@@ -6,6 +6,7 @@ import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { CashDrawerTransaction, CashDrawerTransactionType, CashierShift } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatLKR, formatDateTime, rupeesToCents, formatCommaInput } from '@/utils/format';
+import { promptDialog } from '@/store/useConfirmStore';
 import {
   Coins,
   ArrowDownRight,
@@ -25,6 +26,7 @@ import {
   ArrowUpCircle,
   Clock,
   Sparkles,
+  Check,
 } from 'lucide-react';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
 import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
@@ -33,6 +35,7 @@ import { toast } from 'sonner';
 
 const TYPE_FILTER_OPTIONS: SelectOption[] = [
   { value: 'ALL', label: 'All Movements' },
+  { value: 'PENDING_APPROVAL', label: '⚠️ Pending Requests' },
   { value: 'CASH_SALE', label: 'POS Cash Sales' },
   { value: 'OPENING_CASH', label: 'Opening Float' },
   { value: 'CASH_IN', label: 'Cash In (Add)' },
@@ -77,31 +80,56 @@ export const AdminCashDrawerPage: React.FC = () => {
 
     const unsubDb = db.subscribe(refreshDrawer);
     const unsubTx = realtimeSocketService.on('DRAWER_TRANSACTION', refreshDrawer);
+    const unsubReqPending = realtimeSocketService.on('DRAWER_REQUEST_PENDING', refreshDrawer);
+    const unsubReqApprove = realtimeSocketService.on('DRAWER_REQUEST_APPROVED', refreshDrawer);
+    const unsubReqReject = realtimeSocketService.on('DRAWER_REQUEST_REJECTED', refreshDrawer);
     const unsubShift = realtimeSocketService.on('SHIFT_CHANGED', refreshDrawer);
     const unsubOrder = realtimeSocketService.on('ORDER_CREATED', refreshDrawer);
     const unsubRefund = realtimeSocketService.on('ORDER_REFUNDED', refreshDrawer);
 
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key?.includes('cafemm') || e.key?.includes('drawer') || e.key?.includes('shift')) {
+        refreshDrawer();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+
     return () => {
       unsubDb();
       unsubTx();
+      unsubReqPending();
+      unsubReqApprove();
+      unsubReqReject();
       unsubShift();
       unsubOrder();
       unsubRefund();
+      window.removeEventListener('storage', handleStorage);
     };
   }, []);
+
+  // Pending Cash Requests (Awaiting Admin Approval)
+  const pendingRequests = useMemo(() => {
+    return transactions.filter((t) => t.status === 'PENDING_APPROVAL');
+  }, [transactions]);
 
   // Current Live Drawer Balance
   const currentBalance = activeShift ? cashDrawerService.getCurrentDrawerBalance(activeShift.id) : 0;
   const shiftCashSales = activeShift ? activeShift.cashSales : 0;
   const shiftFloat = activeShift ? activeShift.openingCash : 0;
+  const shiftCashIn = activeShift ? (activeShift.cashIn || 0) : 0;
   const shiftCashOut = activeShift ? activeShift.cashOut : 0;
   const shiftRefunds = activeShift ? activeShift.cashRefunds : 0;
+  const shiftCashDrops = activeShift ? (activeShift.cashDrops || 0) : 0;
 
   // Filtered Transactions
   const filteredTransactions = useMemo(() => {
     return transactions.filter((t) => {
       // Type Filter
-      if (typeFilter !== 'ALL' && t.type !== typeFilter) return false;
+      if (typeFilter === 'PENDING_APPROVAL') {
+        if (t.status !== 'PENDING_APPROVAL') return false;
+      } else if (typeFilter !== 'ALL' && t.type !== typeFilter) {
+        return false;
+      }
 
       // Month & Year Filter
       if (dateRange.year !== 'ALL') {
@@ -125,14 +153,69 @@ export const AdminCashDrawerPage: React.FC = () => {
     });
   }, [transactions, typeFilter, dateRange, search]);
 
-  // Inflow & Outflow totals in filtered view
+  // Inflow, Outflow & Safe Drop totals in filtered view
   const filteredTotalIn = useMemo(() => {
-    return filteredTransactions.filter((t) => t.amount > 0).reduce((sum, t) => sum + t.amount, 0);
+    return filteredTransactions
+      .filter((t) => t.amount > 0 && t.status !== 'REJECTED' && t.status !== 'PENDING_APPROVAL')
+      .reduce((sum, t) => sum + t.amount, 0);
   }, [filteredTransactions]);
 
   const filteredTotalOut = useMemo(() => {
-    return Math.abs(filteredTransactions.filter((t) => t.amount < 0).reduce((sum, t) => sum + t.amount, 0));
+    return Math.abs(
+      filteredTransactions
+        .filter((t) => (t.type === 'CASH_OUT' || t.type === 'CASH_REFUND') && t.status !== 'REJECTED' && t.status !== 'PENDING_APPROVAL')
+        .reduce((sum, t) => sum + t.amount, 0)
+    );
   }, [filteredTransactions]);
+
+  const filteredTotalDrops = useMemo(() => {
+    return Math.abs(
+      filteredTransactions
+        .filter((t) => t.type === 'CASH_DROP' && t.status !== 'REJECTED' && t.status !== 'PENDING_APPROVAL')
+        .reduce((sum, t) => sum + t.amount, 0)
+    );
+  }, [filteredTransactions]);
+
+  // Handle Admin Approving Cash Request
+  const handleApproveRequest = (tx: CashDrawerTransaction) => {
+    try {
+      cashDrawerService.approveCashMovement({
+        transactionId: tx.id,
+        adminId: session?.user?.id || 'admin-user',
+        adminName: session?.user?.name || 'Administrator',
+      });
+      toast.success(
+        `Approved ${tx.type.replace(/_/g, ' ')} of ${formatLKR(Math.abs(tx.amount))} for ${tx.cashierName}.`
+      );
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to approve request.');
+    }
+  };
+
+  // Handle Admin Rejecting Cash Request
+  const handleRejectRequest = async (tx: CashDrawerTransaction) => {
+    const reason = await promptDialog({
+      title: `Reject ${tx.type.replace(/_/g, ' ')} Request`,
+      message: `Enter rejection reason for ${tx.cashierName}'s ${formatLKR(Math.abs(tx.amount))} request:`,
+      defaultValue: 'Not authorized by administrator',
+      confirmText: 'Reject Request',
+      variant: 'danger',
+    });
+
+    if (reason === null) return; // cancelled
+
+    try {
+      cashDrawerService.rejectCashMovement({
+        transactionId: tx.id,
+        adminId: session?.user?.id || 'admin-user',
+        adminName: session?.user?.name || 'Administrator',
+        reason: reason || 'Rejected by administrator',
+      });
+      toast.info(`Rejected ${tx.type.replace(/_/g, ' ')} request.`);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to reject request.');
+    }
+  };
 
   // Handle Manual Drawer Movement Submit
   const handleRecordMovement = (e: React.FormEvent) => {
@@ -166,11 +249,14 @@ export const AdminCashDrawerPage: React.FC = () => {
       amount: recordedAmount,
       reason: movementReason.trim() || 'Manual drawer entry',
       expenseCategory: movementType === 'CASH_OUT' ? expenseCategory : undefined,
+      status: 'APPROVED',
     });
 
     toast.success(
       movementType === 'CASH_IN'
         ? `Added ${formatLKR(amountCents)} to cash drawer`
+        : movementType === 'CASH_DROP'
+        ? `Transferred ${formatLKR(amountCents)} from cash drawer to safe deposit`
         : `Withdrew ${formatLKR(amountCents)} from cash drawer`
     );
 
@@ -180,8 +266,8 @@ export const AdminCashDrawerPage: React.FC = () => {
 
   return (
     <div className="h-full flex-1 flex flex-col min-h-0 space-y-3 w-full animate-in fade-in">
-      {/* 1. TOP STATS CARDS ROW */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 shrink-0">
+      {/* 1. TOP STATS CARDS ROW (4 Metric Cards including Cash Drops) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
         {/* Card 1: Live Drawer Cash */}
         <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E9E0D5] shadow-xs flex items-center justify-between">
           <div>
@@ -196,7 +282,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                 title={activeShift ? 'Active Shift Open' : 'No active shift'}
               />
             </div>
-            <div className="text-2xl sm:text-3xl font-black text-brand-brown-deep tabular-nums">
+            <div className="text-xl sm:text-2xl font-black text-brand-brown-deep tabular-nums">
               {formatLKR(currentBalance)}
             </div>
             <div className="text-[11px] text-text-secondary mt-1 font-semibold truncate">
@@ -205,7 +291,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                 : 'No active cashier shift'}
             </div>
           </div>
-          <div className="w-11 h-11 rounded-2xl bg-cream-100 border border-[#E0D7CC] flex items-center justify-center text-brand-brown shrink-0 shadow-xs">
+          <div className="w-10 h-10 rounded-2xl bg-cream-100 border border-[#E0D7CC] flex items-center justify-center text-brand-brown shrink-0 shadow-xs">
             <Coins className="w-5 h-5" />
           </div>
         </div>
@@ -219,14 +305,15 @@ export const AdminCashDrawerPage: React.FC = () => {
               </span>
               <span className="w-2 h-2 rounded-full bg-brand-teal shrink-0" />
             </div>
-            <div className="text-2xl sm:text-3xl font-black text-brand-teal-dark tabular-nums">
+            <div className="text-xl sm:text-2xl font-black text-brand-teal-dark tabular-nums">
               {formatLKR(shiftCashSales)}
             </div>
             <div className="text-[11px] text-text-secondary mt-1 font-semibold">
-              Opening Float: <span className="font-bold text-brand-brown-dark">{formatLKR(shiftFloat)}</span>
+              Float: <span className="font-bold text-brand-brown-dark">{formatLKR(shiftFloat)}</span>
+              {shiftCashIn > 0 && <span> • In: {formatLKR(shiftCashIn)}</span>}
             </div>
           </div>
-          <div className="w-11 h-11 rounded-2xl bg-teal-50 border border-teal-200/50 flex items-center justify-center text-brand-teal shrink-0 shadow-xs">
+          <div className="w-10 h-10 rounded-2xl bg-teal-50 border border-teal-200/50 flex items-center justify-center text-brand-teal shrink-0 shadow-xs">
             <ArrowDownRight className="w-5 h-5" />
           </div>
         </div>
@@ -240,20 +327,112 @@ export const AdminCashDrawerPage: React.FC = () => {
               </span>
               <span className="w-2 h-2 rounded-full bg-status-danger shrink-0" />
             </div>
-            <div className="text-2xl sm:text-3xl font-black text-status-danger tabular-nums">
+            <div className="text-xl sm:text-2xl font-black text-status-danger tabular-nums">
               {formatLKR(shiftCashOut + shiftRefunds)}
             </div>
             <div className="text-[11px] text-text-secondary mt-1 font-semibold">
               Out: {formatLKR(shiftCashOut)} • Refunds: {formatLKR(shiftRefunds)}
             </div>
           </div>
-          <div className="w-11 h-11 rounded-2xl bg-rose-50 border border-rose-200/60 flex items-center justify-center text-status-danger shrink-0 shadow-xs">
+          <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200/60 flex items-center justify-center text-status-danger shrink-0 shadow-xs">
             <ArrowUpRight className="w-5 h-5" />
+          </div>
+        </div>
+
+        {/* Card 4: Safe Drops to Vault */}
+        <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E9E0D5] shadow-xs flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-1.5 mb-1">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
+                Safe Drops (Vault)
+              </span>
+              <span className="w-2 h-2 rounded-full bg-amber-600 shrink-0" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black text-amber-900 tabular-nums">
+              {formatLKR(shiftCashDrops)}
+            </div>
+            <div className="text-[11px] text-text-secondary mt-1 font-semibold">
+              Shift Safe Drops: <span className="font-bold text-amber-950">{formatLKR(shiftCashDrops)}</span>
+            </div>
+          </div>
+          <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200/70 flex items-center justify-center text-amber-800 shrink-0 shadow-xs">
+            <Building2 className="w-5 h-5" />
           </div>
         </div>
       </div>
 
-      {/* 2. SUB-HEADER BAR: Live Stats on Left, Custom Dropdown & Month Year Picker on Right */}
+      {/* 2. PENDING REQUESTS REVIEW BANNER (IF ANY) */}
+      {pendingRequests.length > 0 && (
+        <div className="bg-amber-50/90 border-2 border-amber-300 rounded-2xl p-4 shadow-2xs space-y-3 shrink-0 animate-in fade-in">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-amber-600" />
+              <h4 className="text-xs font-black uppercase text-amber-950 tracking-wider">
+                Pending Cash Movement Requests ({pendingRequests.length})
+              </h4>
+            </div>
+            <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-amber-500 text-white shadow-2xs">
+              Action Required
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {pendingRequests.map((req) => (
+              <div
+                key={req.id}
+                className="bg-white rounded-2xl p-3.5 border border-amber-200 shadow-2xs space-y-2 flex flex-col justify-between"
+              >
+                <div className="space-y-1 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span
+                      className={`px-2 py-0.5 rounded-full font-black text-[9.5px] uppercase ${
+                        req.type === 'CASH_OUT'
+                          ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                          : 'bg-brand-brown/10 text-brand-brown-dark border border-brand-brown/20'
+                      }`}
+                    >
+                      {req.type.replace(/_/g, ' ')}
+                    </span>
+                    <span className="text-sm font-black text-rose-700 tabular-nums">
+                      {formatLKR(Math.abs(req.amount))}
+                    </span>
+                  </div>
+
+                  <div className="font-bold text-brand-brown-dark pt-1">
+                    Staff: <span className="font-extrabold">{req.cashierName}</span>
+                  </div>
+                  <div className="text-text-secondary text-[11px]">
+                    Reason: <strong className="text-amber-950">{req.reason || 'General expense'}</strong>
+                  </div>
+                  <div className="text-[10px] text-text-muted">
+                    {formatDateTime(req.timestamp)}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-amber-100 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleRejectRequest(req)}
+                    className="px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-all cursor-pointer"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApproveRequest(req)}
+                    className="flex items-center gap-1 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-2xs transition-all active:scale-95 cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Approve</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 3. SUB-HEADER BAR: Live Stats on Left, Custom Dropdown & Month Year Picker on Right */}
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shrink-0">
         {/* Left: Live Statistics with Color Dots */}
         <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs select-none">
@@ -275,11 +454,17 @@ export const AdminCashDrawerPage: React.FC = () => {
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Outflow:</span>
             <span className="font-black text-xs text-status-danger tabular-nums">{formatLKR(filteredTotalOut)}</span>
           </div>
+
+          <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
+            <span className="w-2 h-2 rounded-full bg-amber-600 shrink-0" />
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Safe Drops:</span>
+            <span className="font-black text-xs text-amber-900 tabular-nums">{formatLKR(filteredTotalDrops)}</span>
+          </div>
         </div>
 
         {/* Right: Custom Designed Dropdown & Month Year Picker */}
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
-          <div className="w-[155px] sm:w-[170px]">
+          <div className="w-[170px] sm:w-[185px]">
             <CustomSelect
               value={typeFilter}
               onChange={(val) => setTypeFilter(val)}
@@ -295,7 +480,7 @@ export const AdminCashDrawerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. MAIN DATA TABLE AREA */}
+      {/* 4. MAIN DATA TABLE AREA */}
       <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
         <div className="flex-1 overflow-auto min-h-0 pb-32">
           <table className="w-full text-left text-xs border-collapse">
@@ -305,6 +490,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                 <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Movement Type</th>
                 <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Cashier / Staff</th>
                 <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Details / Reason</th>
+                <th className="py-3.5 px-4 text-center bg-[#FAF7F2]/95">Status</th>
                 <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Movement (LKR)</th>
                 <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Balance After</th>
               </tr>
@@ -312,7 +498,7 @@ export const AdminCashDrawerPage: React.FC = () => {
             <tbody className="divide-y divide-[#F2ECE4] font-medium">
               {filteredTransactions.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="text-center py-20 text-text-muted">
+                  <td colSpan={7} className="text-center py-20 text-text-muted">
                     <Coins className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
                     <div className="font-semibold text-xs text-text-secondary">
                       No cash drawer transactions recorded for this period.
@@ -338,9 +524,16 @@ export const AdminCashDrawerPage: React.FC = () => {
                   const isRefund = tx.type === 'CASH_REFUND';
                   const isDrop = tx.type === 'CASH_DROP';
                   const isOut = tx.type === 'CASH_OUT';
+                  const isPending = tx.status === 'PENDING_APPROVAL';
+                  const isRejected = tx.status === 'REJECTED';
 
                   return (
-                    <tr key={tx.id} className="hover:bg-[#FAF7F2]/70 transition-colors group">
+                    <tr
+                      key={tx.id}
+                      className={`hover:bg-[#FAF7F2]/70 transition-colors group ${
+                        isPending ? 'bg-amber-50/40' : ''
+                      }`}
+                    >
                       {/* Timestamp */}
                       <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
                         {formatDateTime(tx.timestamp)}
@@ -354,15 +547,19 @@ export const AdminCashDrawerPage: React.FC = () => {
                               ? 'bg-status-success-bg text-status-success border-status-success/30'
                               : isRefund || isOut
                               ? 'bg-status-danger-bg text-status-danger border-status-danger/30'
+                              : isDrop
+                              ? 'bg-amber-50 text-amber-900 border-amber-300'
                               : 'bg-amber-50 text-amber-800 border-amber-200'
                           }`}
                         >
-                          {isPositive ? (
-                            <ArrowDownRight className="w-3 h-3 text-status-success" />
+                          {isDrop ? (
+                            <Building2 className="w-3 h-3 text-amber-800 shrink-0" />
+                          ) : isPositive ? (
+                            <ArrowDownRight className="w-3 h-3 text-status-success shrink-0" />
                           ) : (
-                            <ArrowUpRight className="w-3 h-3 text-status-danger" />
+                            <ArrowUpRight className="w-3 h-3 text-status-danger shrink-0" />
                           )}
-                          <span>{tx.type.replace(/_/g, ' ')}</span>
+                          <span>{isDrop ? 'CASH DROP' : tx.type.replace(/_/g, ' ')}</span>
                         </span>
                       </td>
 
@@ -383,11 +580,51 @@ export const AdminCashDrawerPage: React.FC = () => {
                         </div>
                       </td>
 
+                      {/* Status Column with Inline Actions */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                        {isPending ? (
+                          <div className="flex items-center justify-center gap-1.5">
+                            <span className="px-2.5 py-0.5 rounded-full font-extrabold text-[9.5px] uppercase bg-amber-500 text-white shadow-2xs animate-pulse inline-flex items-center gap-1">
+                              <Clock className="w-2.5 h-2.5" />
+                              PENDING
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleApproveRequest(tx)}
+                              className="p-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs transition-all active:scale-95 cursor-pointer"
+                              title="Approve request"
+                            >
+                              <Check className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleRejectRequest(tx)}
+                              className="p-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-all cursor-pointer"
+                              title="Reject request"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ) : isRejected ? (
+                          <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-rose-50 text-rose-700 border border-rose-200">
+                            REJECTED
+                          </span>
+                        ) : (
+                          <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-status-success-bg text-status-success border border-status-success/30">
+                            APPROVED
+                          </span>
+                        )}
+                      </td>
+
                       {/* Movement Amount */}
                       <td className="py-3.5 px-4 text-right">
                         <span
                           className={`font-black text-xs tabular-nums ${
-                            isPositive ? 'text-status-success' : 'text-status-danger'
+                            isRejected
+                              ? 'text-text-muted line-through'
+                              : isPositive
+                              ? 'text-status-success'
+                              : 'text-status-danger'
                           }`}
                         >
                           {isPositive ? `+${formatLKR(tx.amount)}` : formatLKR(tx.amount)}
@@ -406,7 +643,7 @@ export const AdminCashDrawerPage: React.FC = () => {
               {/* Bottom Spacer Row to Ensure Last Record is Never Hidden by Floating Capsule */}
               {filteredTransactions.length > 0 && (
                 <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
-                  <td colSpan={6} className="h-24 bg-transparent border-0" />
+                  <td colSpan={7} className="h-24 bg-transparent border-0" />
                 </tr>
               )}
             </tbody>

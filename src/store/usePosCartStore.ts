@@ -6,11 +6,14 @@ interface PosCartState {
   items: OrderItem[];
   orderType: OrderType;
   tableNumber: string;
+  customerId: string;
   customerName: string;
   customerPhone: string;
   discountPercent: number;
   discountFixedCents: number;
   discountReason: string;
+  loyaltyPointsRedeemed: number;
+  loyaltyDiscountCents: number;
 
   // Actions
   addItem: (product: Product, modifiers: OrderItemModifier[], quantity?: number, notes?: string) => void;
@@ -18,7 +21,9 @@ interface PosCartState {
   removeItem: (itemId: string) => void;
   setOrderType: (type: OrderType) => void;
   setTableNumber: (table: string) => void;
-  setCustomerInfo: (name: string, phone: string) => void;
+  setCustomerInfo: (name: string, phone: string, customerId?: string) => void;
+  setLoyaltyRedemption: (points: number, discountCents: number) => void;
+  clearLoyaltyRedemption: () => void;
   setDiscount: (params: { percent?: number; fixedCents?: number; reason?: string }) => void;
   clearDiscount: () => void;
   clearCart: () => void;
@@ -37,11 +42,14 @@ export const usePosCartStore = create<PosCartState>((set, get) => ({
   items: [],
   orderType: 'DINE_IN',
   tableNumber: '',
+  customerId: '',
   customerName: '',
   customerPhone: '',
   discountPercent: 0,
   discountFixedCents: 0,
   discountReason: '',
+  loyaltyPointsRedeemed: 0,
+  loyaltyDiscountCents: 0,
 
   addItem: (product, modifiers, quantity = 1, notes = '') => {
     const modifierSum = modifiers.reduce((acc, m) => acc + m.priceCents, 0);
@@ -110,7 +118,14 @@ export const usePosCartStore = create<PosCartState>((set, get) => ({
 
   setOrderType: (orderType) => set({ orderType }),
   setTableNumber: (tableNumber) => set({ tableNumber }),
-  setCustomerInfo: (customerName, customerPhone) => set({ customerName, customerPhone }),
+  setCustomerInfo: (customerName, customerPhone, customerId = '') =>
+    set({ customerName, customerPhone, customerId }),
+
+  setLoyaltyRedemption: (points, discountCents) =>
+    set({ loyaltyPointsRedeemed: points, loyaltyDiscountCents: discountCents }),
+
+  clearLoyaltyRedemption: () =>
+    set({ loyaltyPointsRedeemed: 0, loyaltyDiscountCents: 0 }),
 
   setDiscount: ({ percent, fixedCents, reason }) => {
     set({
@@ -129,8 +144,11 @@ export const usePosCartStore = create<PosCartState>((set, get) => ({
       discountPercent: 0,
       discountFixedCents: 0,
       discountReason: '',
+      customerId: '',
       customerName: '',
       customerPhone: '',
+      loyaltyPointsRedeemed: 0,
+      loyaltyDiscountCents: 0,
     }),
 
   restoreCartFromHeldOrder: (heldOrder: HeldOrder) => {
@@ -138,11 +156,14 @@ export const usePosCartStore = create<PosCartState>((set, get) => ({
       items: heldOrder.items,
       orderType: heldOrder.orderType,
       tableNumber: heldOrder.tableNumber || '',
+      customerId: '',
       customerName: heldOrder.customerName || '',
       customerPhone: heldOrder.customerPhone || '',
       discountPercent: heldOrder.discountPercent || 0,
       discountFixedCents: heldOrder.discountPercent ? 0 : heldOrder.discountCents,
       discountReason: heldOrder.discountReason || '',
+      loyaltyPointsRedeemed: 0,
+      loyaltyDiscountCents: 0,
     });
   },
 
@@ -152,14 +173,15 @@ export const usePosCartStore = create<PosCartState>((set, get) => ({
 
   getDiscountCents: () => {
     const subtotal = get().getSubtotalCents();
-    const { discountPercent, discountFixedCents } = get();
+    const { discountPercent, discountFixedCents, loyaltyDiscountCents = 0 } = get();
+    let totalDisc = 0;
     if (discountFixedCents > 0) {
-      return Math.min(subtotal, discountFixedCents);
+      totalDisc += Math.min(subtotal, discountFixedCents);
+    } else if (discountPercent > 0) {
+      totalDisc += Math.round((subtotal * discountPercent) / 100);
     }
-    if (discountPercent > 0) {
-      return Math.round((subtotal * discountPercent) / 100);
-    }
-    return 0;
+    totalDisc += Math.min(Math.max(0, subtotal - totalDisc), loyaltyDiscountCents);
+    return Math.min(subtotal, totalDisc);
   },
 
   getServiceChargeCents: () => {

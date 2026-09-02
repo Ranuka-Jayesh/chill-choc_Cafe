@@ -3,6 +3,7 @@ import { BrandLogo } from '@/components/brand/BrandLogo';
 import { CashierShift, User } from '@/types';
 import { db } from '@/services/storage/db';
 import { cashDrawerService } from '@/services/cashDrawerService';
+import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { formatLKR } from '@/utils/format';
 import {
   Clock,
@@ -15,6 +16,8 @@ import {
   PauseCircle,
   Receipt,
   Boxes,
+  UserCheck,
+  Truck,
 } from 'lucide-react';
 import { format } from 'date-fns';
 
@@ -23,6 +26,7 @@ interface PosHeaderProps {
   shift: CashierShift | null;
   onOpenOrdersHistory: () => void;
   onOpenExpenses?: () => void;
+  onOpenAttendance?: () => void;
   onOpenStockDrawer?: () => void;
   onOpenCashInOut: () => void;
   onOpenPrinterManager: () => void;
@@ -36,6 +40,7 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
   shift,
   onOpenOrdersHistory,
   onOpenExpenses,
+  onOpenAttendance,
   onOpenStockDrawer,
   onOpenCashInOut,
   onOpenPrinterManager,
@@ -97,9 +102,20 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
     };
 
     updateLiveState();
-    const unsub = db.subscribe(() => {
-      updateLiveState();
-    });
+    const unsubDb = db.subscribe(updateLiveState);
+    const unsubDrawerTx = realtimeSocketService.on('DRAWER_TRANSACTION', updateLiveState);
+    const unsubDrawerApprove = realtimeSocketService.on('DRAWER_REQUEST_APPROVED', updateLiveState);
+    const unsubDrawerReject = realtimeSocketService.on('DRAWER_REQUEST_REJECTED', updateLiveState);
+    const unsubShift = realtimeSocketService.on('SHIFT_CHANGED', updateLiveState);
+    const unsubOrder = realtimeSocketService.on('ORDER_CREATED', updateLiveState);
+    const unsubRefund = realtimeSocketService.on('ORDER_REFUNDED', updateLiveState);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key?.includes('cafemm') || e.key?.includes('drawer') || e.key?.includes('shift')) {
+        updateLiveState();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
 
     const handleFullscreenChange = () => {
       const isFull = !!document.fullscreenElement;
@@ -138,7 +154,14 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
 
     return () => {
       clearInterval(timer);
-      unsub();
+      unsubDb();
+      unsubDrawerTx();
+      unsubDrawerApprove();
+      unsubDrawerReject();
+      unsubShift();
+      unsubOrder();
+      unsubRefund();
+      window.removeEventListener('storage', handleStorage);
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
       window.removeEventListener('keydown', handleKeyDown);
     };
@@ -238,6 +261,18 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
           </button>
         )}
 
+        {/* Staff Attendance & Digital Clock-In Button (Icon Only) */}
+        {onOpenAttendance && (
+          <button
+            type="button"
+            onClick={onOpenAttendance}
+            className="h-10 w-10 sm:h-11 sm:w-11 rounded-xl sm:rounded-2xl flex items-center justify-center border border-border/80 bg-white hover:bg-brand-teal-light/40 hover:border-brand-teal/40 text-brand-teal shadow-xs transition-all active:scale-95 cursor-pointer"
+            title="Staff Attendance & Digital Clock-In"
+          >
+            <UserCheck className="w-4 h-4 sm:w-4.5 sm:h-4.5 text-brand-teal stroke-[2.2]" />
+          </button>
+        )}
+
         {/* Stock / Ingredients Drawer Button */}
         {onOpenStockDrawer && (
           <button
@@ -259,6 +294,16 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
             ) : null}
           </button>
         )}
+
+        {/* Stock / Deliveries Page (Opens in New Tab) */}
+        <button
+          type="button"
+          onClick={() => window.open('/pos/stock', '_blank')}
+          className="h-10 w-10 sm:h-11 sm:w-11 rounded-xl sm:rounded-2xl flex items-center justify-center border border-border/80 bg-white hover:bg-cream-100 hover:text-brand-teal text-text-secondary shadow-xs transition-all active:scale-95 cursor-pointer"
+          title="Cashier Stock & Deliveries Portal (Opens in new tab)"
+        >
+          <Truck className="w-4 h-4 sm:w-4.5 sm:h-4.5 stroke-[2.2]" />
+        </button>
 
         {/* Printer Management Button */}
         <button

@@ -2,8 +2,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { usePosCartStore } from '@/store/usePosCartStore';
 import { orderService } from '@/services/orderService';
 import { soundService } from '@/services/soundService';
-import { CashierShift, Order, PaymentMethod, PaymentSplit, User } from '@/types';
+import { CashierShift, Order, PaymentMethod, PaymentSplit, User, Customer } from '@/types';
 import { formatLKR, rupeesToCents, centsToRupees, formatCommaInput } from '@/utils/format';
+import { CustomerLoyaltyModal, LoyaltyExchangeIcon } from './CustomerLoyaltyModal';
 import {
   Banknote,
   CreditCard,
@@ -15,6 +16,8 @@ import {
   Sparkles,
   ArrowRight,
   ShieldCheck,
+  Receipt,
+  UserCheck,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import confetti from 'canvas-confetti';
@@ -38,10 +41,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     items,
     orderType,
     tableNumber,
+    customerId,
     customerName,
     customerPhone,
     discountPercent,
     discountReason,
+    loyaltyPointsRedeemed,
+    loyaltyDiscountCents,
+    setCustomerInfo,
+    setLoyaltyRedemption,
+    clearLoyaltyRedemption,
     getSubtotalCents,
     getDiscountCents,
     getServiceChargeCents,
@@ -52,11 +61,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   const totalCents = getTotalCents();
   const subtotalCents = getSubtotalCents();
-  const discountCents = getDiscountCents();
+  const totalDiscountCents = getDiscountCents();
+  const manualDiscountCents = Math.max(0, totalDiscountCents - (loyaltyDiscountCents || 0));
   const serviceChargeCents = getServiceChargeCents();
   const taxCents = getTaxCents();
 
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
+  const [isLoyaltyModalOpen, setIsLoyaltyModalOpen] = useState<boolean>(false);
 
   // Cash state
   const [cashReceivedInput, setCashReceivedInput] = useState<string>('');
@@ -190,13 +201,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         terminalId: shift.terminalId,
         orderType,
         tableNumber: orderType === 'DINE_IN' ? tableNumber : undefined,
-        customerName,
-        customerPhone,
+        customerId: customerId || undefined,
+        customerName: customerName || undefined,
+        customerPhone: customerPhone || undefined,
+        loyaltyPointsRedeemed: loyaltyPointsRedeemed || undefined,
+        loyaltyDiscountCents: loyaltyDiscountCents || undefined,
         items,
         subtotalCents,
-        discountCents,
+        discountCents: manualDiscountCents,
         discountPercent,
-        discountReason,
+        discountReason: loyaltyDiscountCents > 0
+          ? (discountReason ? `${discountReason} + Loyalty Redemption (${loyaltyPointsRedeemed} Pts)` : `Loyalty Redemption (${loyaltyPointsRedeemed} Pts)`)
+          : discountReason,
         serviceChargeCents,
         taxCents,
         totalCents,
@@ -238,11 +254,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     user,
     orderType,
     tableNumber,
+    customerId,
     customerName,
     customerPhone,
+    loyaltyPointsRedeemed,
+    loyaltyDiscountCents,
     items,
     subtotalCents,
-    discountCents,
+    manualDiscountCents,
     discountPercent,
     discountReason,
     serviceChargeCents,
@@ -255,7 +274,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Physical Keyboard listener for Numpad, Enter, Escape, Backspace
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || isLoyaltyModalOpen) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -300,498 +319,623 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         } else if (e.key === '.') {
           e.preventDefault();
           handleNumpad('.');
-        } else if (e.key === 'Backspace') {
-          e.preventDefault();
+        }
+      } else if (e.key === 'Backspace') {
+        const activeTag = (document.activeElement?.tagName || '').toLowerCase();
+        if (activeTag !== 'input') {
           handleNumpad('BACKSPACE');
-        } else if (e.key === 'Delete' || e.key.toLowerCase() === 'c') {
-          e.preventDefault();
-          handleNumpad('CLEAR');
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, paymentMethod, handleNumpad, handleCompletePayment, onClose]);
+  }, [isOpen, isLoyaltyModalOpen, handleNumpad, handleCompletePayment, onClose]);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-brand-brown-deep/70 backdrop-blur-md animate-in fade-in">
-      <div className="relative w-full max-w-2xl bg-white rounded-3xl sm:rounded-[32px] shadow-2xl border border-border/80 overflow-hidden flex flex-col max-h-[92vh]">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 sm:py-5 bg-gradient-to-r from-cream-50 to-white border-b border-border/70">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <h2 className="font-black text-lg sm:text-xl text-brand-brown-dark tracking-tight">
-                Tender & Settlement
-              </h2>
-              <span className="px-2.5 py-0.5 rounded-full bg-brand-teal-light text-brand-teal text-[11px] font-extrabold uppercase tracking-wide border border-brand-teal/20">
-                {orderType === 'DINE_IN' ? (tableNumber ? `Dine In • Table ${tableNumber}` : 'Dine In') : 'Takeaway Counter'}
-              </span>
-            </div>
-            <p className="text-xs text-text-secondary mt-0.5">
-              Cashier: {user.name} • Terminal: {shift.terminalName}
-            </p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 lg:p-8 bg-brand-brown-deep/80 backdrop-blur-md overflow-y-auto animate-in fade-in">
+      <div className="relative w-full max-w-[1360px] my-auto">
+        <div className="flex items-center justify-between gap-3 mb-4 text-white shrink-0">
+          <div className="flex items-center gap-3 flex-wrap">
+            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-black tracking-tight text-white drop-shadow-sm">
+              Tender & Settlement
+            </h1>
+            <span className="px-4 py-1.5 rounded-full bg-white/20 backdrop-blur-md text-xs sm:text-sm font-bold text-cream-100 border border-white/25 uppercase tracking-wide">
+              {orderType === 'DINE_IN' ? (tableNumber ? `Dine In • Table ${tableNumber}` : 'Dine In') : 'Takeaway Counter'}
+            </span>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="w-9 h-9 flex items-center justify-center rounded-xl text-text-secondary hover:bg-cream-100 hover:text-brand-brown-dark transition-all"
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/15 hover:bg-white/25 backdrop-blur-md text-white text-xs sm:text-sm font-bold transition-all border border-white/20 cursor-pointer active:scale-95 shadow-sm"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4 sm:w-5 sm:h-5" />
+            <span>Close</span>
           </button>
         </div>
 
-        {/* Big Total Banner */}
-        <div className="bg-brand-brown-deep text-white px-6 sm:px-8 py-4 sm:py-5 flex items-center justify-between shadow-inner">
-          <div>
-            <div className="text-[11px] uppercase font-black tracking-widest text-brand-yellow">
-              TOTAL DUE
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6 items-stretch">
+          {/* ========================================================================= */}
+          {/* CARD 1 (LEFT - 5 Cols): ORDER ITEMS & FINANCIAL SUMMARY                   */}
+          {/* ========================================================================= */}
+          <div className="lg:col-span-5 flex flex-col justify-between bg-white rounded-2xl sm:rounded-[28px] shadow-2xl border border-[#E9E0D5] overflow-hidden min-h-[560px] lg:min-h-[660px]">
+            {/* 1. Header Banner: Total Due & Loyalty Icon */}
+            <div className="p-5 sm:p-6 bg-[#FAF7F2] border-b border-[#EAE3DA]">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-xs font-black uppercase tracking-wider text-text-muted flex items-center gap-1.5">
+                  <Receipt className="w-4 h-4 text-brand-teal" />
+                  Order Summary
+                </span>
+
+                {/* Loyalty / Member Rewards Button with Star-Coins Exchange Icon */}
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsLoyaltyModalOpen(true)}
+                    className={`px-3 py-1.5 rounded-full text-xs font-black transition-all flex items-center gap-2 cursor-pointer active:scale-95 shadow-xs border ${
+                      customerName
+                        ? 'bg-amber-100 hover:bg-amber-200/90 text-amber-900 border-amber-300 ring-2 ring-amber-400/30'
+                        : 'bg-white hover:bg-amber-50 text-brand-brown-dark border-[#E0D7CC] hover:border-amber-300'
+                    }`}
+                    title="Link customer to earn & redeem loyalty points"
+                  >
+                    <LoyaltyExchangeIcon className="w-5 h-5 shrink-0" />
+                    <span>
+                      {customerName ? customerName : 'Add Member / Points'}
+                    </span>
+                    {loyaltyPointsRedeemed > 0 && (
+                      <span className="bg-amber-600 text-white text-[10px] font-black px-1.5 py-0.5 rounded-full">
+                        -{loyaltyPointsRedeemed} Pts
+                      </span>
+                    )}
+                  </button>
+
+                  {customerName && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCustomerInfo('', '', '');
+                        clearLoyaltyRedemption();
+                        toast.info('Customer unlinked');
+                      }}
+                      className="w-7 h-7 rounded-full bg-cream-100 hover:bg-red-50 text-text-muted hover:text-red-600 border border-[#D5C7B8] flex items-center justify-center text-xs font-bold cursor-pointer transition-colors"
+                      title="Unlink customer from order"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-baseline justify-between gap-2 mt-3">
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-base sm:text-lg font-black text-brand-teal">Rs.</span>
+                  <span className="font-extrabold text-3xl sm:text-4xl lg:text-5xl text-brand-brown-dark tracking-tight">
+                    {(totalCents / 100).toLocaleString('en-LK', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <span className="text-xs sm:text-sm text-text-muted font-bold shrink-0">Total Due</span>
+              </div>
             </div>
-            <div className="text-3xl sm:text-4xl font-black tracking-tight tabular-nums mt-0.5">
-              {formatLKR(totalCents)}
+
+            {/* 2. Middle Scrollable: Itemized Order List */}
+            <div className="flex-1 p-5 sm:p-6 overflow-y-auto max-h-[340px] sm:max-h-[420px] space-y-1.5 text-xs sm:text-sm scrollbar-thin">
+              <div className="pb-2 border-b border-[#EAE3DA] flex items-center justify-between font-black uppercase text-xs text-text-muted tracking-wider">
+                <span>Items & Modifiers</span>
+                <span>Amount</span>
+              </div>
+
+              <div className="divide-y divide-[#F0EAE1]">
+                {items.map((item, idx) => (
+                  <div key={idx} className="py-2.5 flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="font-bold text-brand-brown-dark text-sm sm:text-base truncate">
+                        <span className="font-extrabold text-brand-teal mr-1.5">{item.quantity}x</span>
+                        <span>{item.name}</span>
+                      </div>
+                      {item.modifiers && item.modifiers.length > 0 && (
+                        <p className="text-xs text-text-muted truncate mt-0.5 font-medium pl-4">
+                          {item.modifiers.map((m) => m.optionName).join(', ')}
+                        </p>
+                      )}
+                    </div>
+                    <span className="font-bold text-brand-brown-dark shrink-0 text-sm sm:text-base">
+                      {formatLKR(item.itemTotalCents)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 3. Bottom Financial Breakdown */}
+            <div className="p-5 sm:p-6 bg-[#FAF7F2] border-t border-[#EAE3DA] space-y-1.5 text-xs sm:text-sm">
+              <div className="flex items-center justify-between pb-1.5 border-b border-[#F0EAE1] text-text-secondary font-medium">
+                <span>Subtotal</span>
+                <span>{formatLKR(subtotalCents)}</span>
+              </div>
+
+              {manualDiscountCents > 0 && (
+                <div className="flex items-center justify-between pb-1.5 border-b border-[#F0EAE1] text-amber-800 font-medium">
+                  <span>Discount {discountPercent ? `(${discountPercent}%)` : ''}</span>
+                  <span>-{formatLKR(manualDiscountCents)}</span>
+                </div>
+              )}
+
+              {loyaltyDiscountCents > 0 && (
+                <div className="flex items-center justify-between pb-1.5 border-b border-[#F0EAE1] text-emerald-800 font-medium">
+                  <span>Loyalty Points ({loyaltyPointsRedeemed} Pts)</span>
+                  <span className="font-bold">-{formatLKR(loyaltyDiscountCents)}</span>
+                </div>
+              )}
+
+              {serviceChargeCents > 0 && (
+                <div className="flex items-center justify-between pb-1.5 border-b border-[#F0EAE1] text-text-secondary font-medium">
+                  <span>Service Charge</span>
+                  <span>+{formatLKR(serviceChargeCents)}</span>
+                </div>
+              )}
+
+              {taxCents > 0 && (
+                <div className="flex items-center justify-between pb-1.5 border-b border-[#F0EAE1] text-text-secondary font-medium">
+                  <span>Taxes & VAT</span>
+                  <span>+{formatLKR(taxCents)}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-1.5 font-black text-brand-brown-dark text-base sm:text-lg lg:text-xl">
+                <span>Final Settlement</span>
+                <span className="text-brand-teal font-black">{formatLKR(totalCents)}</span>
+              </div>
             </div>
           </div>
-          <div className="text-right text-xs text-cream-200 space-y-0.5 font-medium">
-            <div>Subtotal: {formatLKR(subtotalCents)}</div>
-            {discountCents > 0 && (
-              <div className="text-brand-yellow font-bold">Discount: -{formatLKR(discountCents)}</div>
-            )}
-            <div>{items.reduce((a, i) => a + i.quantity, 0)} items in order</div>
-          </div>
-        </div>
 
-        {/* Payment Method Selector Tabs (3 Clean Tabs: Cash, Card, Split) */}
-        <div className="p-3 bg-cream-50/80 border-b border-border/70">
-          <div className="grid grid-cols-3 gap-2 sm:gap-3">
-            <button
-              onClick={() => setPaymentMethod('CASH')}
-              className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-black text-xs sm:text-sm transition-all active:scale-95 ${
-                paymentMethod === 'CASH'
-                  ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
-                  : 'bg-white text-text-primary hover:bg-cream-100/80 border border-border shadow-xs'
-              }`}
-            >
-              <Banknote className="w-4 h-4 sm:w-5 sm:h-5 stroke-[2.2]" />
-              <span>Cash</span>
-            </button>
+          <div className="lg:col-span-7 flex flex-col justify-between bg-white rounded-2xl sm:rounded-[28px] shadow-2xl border border-[#E9E0D5] overflow-hidden min-h-[560px] lg:min-h-[660px]">
+            {/* 1. Payment Method Selector Tabs */}
+            <div className="p-4 sm:p-5 bg-[#FAF7F2] border-b border-[#EAE3DA] shrink-0">
+              <div className="grid grid-cols-3 gap-3 sm:gap-4">
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('CASH')}
+                  className={`flex items-center justify-center gap-2.5 py-3.5 sm:py-4 rounded-2xl font-black text-sm sm:text-base transition-all active:scale-95 cursor-pointer ${
+                    paymentMethod === 'CASH'
+                      ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
+                      : 'bg-white text-brand-brown-dark border border-[#E0D7CC] hover:bg-cream-100'
+                  }`}
+                >
+                  <Banknote className="w-5 h-5 sm:w-6 sm:h-6 stroke-[2.2]" />
+                  <span>Cash</span>
+                </button>
 
-            <button
-              onClick={() => setPaymentMethod('CARD')}
-              className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-black text-xs sm:text-sm transition-all active:scale-95 ${
-                paymentMethod === 'CARD'
-                  ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
-                  : 'bg-white text-text-primary hover:bg-cream-100/80 border border-border shadow-xs'
-              }`}
-            >
-              <CreditCard className="w-4 h-4 sm:w-5 sm:h-5 stroke-[2.2]" />
-              <span>Card</span>
-            </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('CARD')}
+                  className={`flex items-center justify-center gap-2.5 py-3.5 sm:py-4 rounded-2xl font-black text-sm sm:text-base transition-all active:scale-95 cursor-pointer ${
+                    paymentMethod === 'CARD'
+                      ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
+                      : 'bg-white text-brand-brown-dark border border-[#E0D7CC] hover:bg-cream-100'
+                  }`}
+                >
+                  <CreditCard className="w-5 h-5 sm:w-6 sm:h-6 stroke-[2.2]" />
+                  <span>Card</span>
+                </button>
 
-            <button
-              onClick={() => {
-                setPaymentMethod('SPLIT');
-                selectSplitField('cash');
-              }}
-              className={`flex items-center justify-center gap-2 py-3 rounded-2xl font-black text-xs sm:text-sm transition-all active:scale-95 ${
-                paymentMethod === 'SPLIT'
-                  ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
-                  : 'bg-white text-text-primary hover:bg-cream-100/80 border border-border shadow-xs'
-              }`}
-            >
-              <Split className="w-4 h-4 sm:w-5 sm:h-5 stroke-[2.2]" />
-              <span>Split Tender</span>
-            </button>
-          </div>
-        </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentMethod('SPLIT');
+                    selectSplitField('cash');
+                  }}
+                  className={`flex items-center justify-center gap-2.5 py-3.5 sm:py-4 rounded-2xl font-black text-sm sm:text-base transition-all active:scale-95 cursor-pointer ${
+                    paymentMethod === 'SPLIT'
+                      ? 'bg-brand-teal text-white shadow-teal ring-2 ring-brand-teal'
+                      : 'bg-white text-brand-brown-dark border border-[#E0D7CC] hover:bg-cream-100'
+                  }`}
+                >
+                  <Split className="w-5 h-5 sm:w-6 sm:h-6 stroke-[2.2]" />
+                  <span>Split Tender</span>
+                </button>
+              </div>
+            </div>
 
-        {/* Tab Body */}
-        <div className="flex-1 overflow-y-auto p-5 sm:p-7 bg-white">
-          {/* 1. CASH PAYMENT SCREEN */}
-          {paymentMethod === 'CASH' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 sm:gap-6">
-              {/* Left: Quick Bill Presets & Change Calculation */}
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs font-extrabold uppercase tracking-wider text-text-secondary">
-                    Cash Received
-                  </label>
-                  <div className="mt-1 relative flex items-center bg-cream-50/80 border-2 border-brand-teal rounded-2xl shadow-inner focus-within:ring-4 focus-within:ring-brand-teal/20 transition-all">
-                    <span className="pl-4 font-black text-brand-brown-dark text-base">Rs.</span>
+            {/* 2. Tender Method Body */}
+            <div className="p-5 sm:p-7 flex-1 flex flex-col justify-center">
+              {/* TAB 1: CASH PAYMENT */}
+              {paymentMethod === 'CASH' && (
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 sm:gap-7 items-center">
+                  {/* Left Column: Cash Input, Presets, Change */}
+                  <div className="sm:col-span-6 space-y-4">
+                    {/* Cash Received Field */}
+                    <div className="space-y-1.5 pb-3 border-b border-[#EAE3DA]">
+                      <label className="text-xs font-black uppercase tracking-wider text-text-muted block">
+                        Cash Received
+                      </label>
+                      <div className="relative flex items-center bg-white border-2 border-[#E0D7CC] rounded-2xl focus-within:border-brand-teal focus-within:ring-4 focus-within:ring-brand-teal/15 transition-all">
+                        <span className="pl-4 font-black text-brand-brown-dark text-lg sm:text-xl">Rs.</span>
+                        <input
+                          id="cash-received-input"
+                          type="text"
+                          placeholder="0.00"
+                          value={formatCommaInput(cashReceivedInput)}
+                          onChange={(e) => setCashReceivedInput(e.target.value.replace(/,/g, ''))}
+                          className="w-full pl-2 pr-4 py-3.5 sm:py-4 bg-transparent text-right font-mono font-black text-2xl sm:text-3xl lg:text-4xl text-brand-brown-dark tabular-nums focus:outline-none"
+                          autoFocus
+                        />
+                      </div>
+                    </div>
+
+                    {/* Quick Cash Presets */}
+                    <div className="space-y-2 pb-3 border-b border-[#EAE3DA]">
+                      <label className="text-xs font-black uppercase tracking-wider text-text-muted block">
+                        Quick Cash Presets
+                      </label>
+                      <div className="grid grid-cols-3 gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(centsToRupees(totalCents))}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-black text-brand-teal transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Exact
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(1000)}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Rs. 1,000
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(2000)}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Rs. 2,000
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(3000)}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Rs. 3,000
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(5000)}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Rs. 5,000
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setCashQuickPreset(10000)}
+                          className="py-3 sm:py-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                        >
+                          Rs. 10,000
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Change Due (Bottom border only, clean single line) */}
+                    <div className="pt-1.5 flex items-center justify-between gap-3">
+                      <span className="text-xs font-black uppercase text-text-muted tracking-wider block">
+                        Change Due
+                      </span>
+                      <span className="font-mono font-black text-xl sm:text-2xl text-brand-brown-dark tabular-nums whitespace-nowrap">
+                        {formatLKR(changeCents)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Tactile Numpad (No container bg/border, larger keys) */}
+                  <div className="sm:col-span-6 p-1 sm:p-2 space-y-3.5 flex flex-col justify-center">
+                    <div className="grid grid-cols-3 gap-3 sm:gap-4 place-items-center">
+                      {['7', '8', '9', '4', '5', '6', '1', '2', '3'].map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => handleNumpad(num)}
+                          className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                        >
+                          {num}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('CLEAR')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-rose-200 shadow-2xs font-bold text-xs sm:text-sm text-rose-700 hover:bg-rose-50 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('0')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        0
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('.')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        .
+                      </button>
+                    </div>
+
+                    <div className="pt-2.5 border-t border-[#EAE3DA]">
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('BACKSPACE')}
+                        className="w-full h-12 sm:h-13 bg-white hover:bg-cream-100 rounded-full border border-[#E0D7CC] flex items-center justify-center gap-2 text-xs sm:text-sm font-black text-brand-brown-dark active:scale-95 transition-all cursor-pointer shadow-2xs"
+                      >
+                        <Delete className="w-4 h-4 sm:w-5 sm:h-5" />
+                        <span>Backspace</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: CARD PAYMENT */}
+              {paymentMethod === 'CARD' && (
+                <div className="max-w-lg mx-auto space-y-6 text-center py-10">
+                  <div className="w-20 h-20 rounded-3xl bg-[#FAF7F2] border border-[#EAE3DA] text-brand-teal flex items-center justify-center mx-auto shadow-xs">
+                    <CreditCard className="w-10 h-10 stroke-[2]" />
+                  </div>
+                  <div>
+                    <h3 className="font-black text-lg sm:text-xl text-brand-brown-dark">
+                      Process Card on POS Card Terminal
+                    </h3>
+                    <p className="text-xs sm:text-sm text-text-secondary mt-1">
+                      Digital card transaction does not affect physical drawer float.
+                    </p>
+                  </div>
+                  <div className="text-left space-y-2 pt-3 pb-3 border-b border-[#EAE3DA]">
+                    <label className="text-xs font-black uppercase text-text-muted block">
+                      Optional Card Auth / Slip Reference #
+                    </label>
                     <input
-                      id="cash-received-input"
                       type="text"
-                      placeholder="0.00"
-                      value={formatCommaInput(cashReceivedInput)}
-                      onChange={(e) => setCashReceivedInput(e.target.value.replace(/,/g, ''))}
-                      className="w-full pl-2 pr-4 py-3 bg-transparent text-right font-black text-2xl sm:text-3xl text-text-primary tabular-nums focus:outline-none"
+                      placeholder="e.g. VISA-9842"
+                      value={cardRef}
+                      onChange={(e) => setCardRef(e.target.value)}
+                      className="w-full px-4 py-3 bg-white border-2 border-[#E0D7CC] rounded-2xl font-mono text-sm font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal"
                       autoFocus
                     />
                   </div>
                 </div>
+              )}
 
-                {/* Quick Bills Buttons */}
-                <div>
-                  <label className="text-xs font-extrabold uppercase tracking-wider text-text-secondary">
-                    Quick Cash Presets
-                  </label>
-                  <div className="grid grid-cols-3 gap-2 mt-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(centsToRupees(totalCents))}
-                      className="py-2.5 rounded-xl border border-brand-teal/40 bg-brand-teal-light hover:bg-brand-teal hover:text-white text-xs font-black text-brand-teal transition-colors"
-                    >
-                      Exact
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(1000)}
-                      className="py-2.5 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-colors"
-                    >
-                      Rs. 1,000
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(2000)}
-                      className="py-2.5 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-colors"
-                    >
-                      Rs. 2,000
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(3000)}
-                      className="py-2.5 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-colors"
-                    >
-                      Rs. 3,000
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(5000)}
-                      className="py-2.5 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-colors"
-                    >
-                      Rs. 5,000
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCashQuickPreset(10000)}
-                      className="py-2.5 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-colors"
-                    >
-                      Rs. 10,000
-                    </button>
-                  </div>
-                </div>
-
-                {/* Change Due Display */}
-                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-center justify-between shadow-xs">
-                  <div>
-                    <div className="text-[11px] font-black uppercase text-emerald-800 tracking-wider">
-                      CHANGE DUE
-                    </div>
-                    <div className="text-2xl sm:text-3xl font-black text-emerald-700 tabular-nums mt-0.5">
-                      {formatLKR(changeCents)}
-                    </div>
-                  </div>
-                  <CheckCircle2 className="w-8 h-8 text-emerald-600/60" />
-                </div>
-              </div>
-
-              {/* Right: Tactile Touch Numpad & USB Physical Keypad Support */}
-              <div className="bg-cream-50/80 p-4 rounded-3xl border border-border flex flex-col justify-between gap-2.5">
-                <div className="grid grid-cols-3 gap-2">
-                  {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      onClick={() => handleNumpad(num)}
-                      className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                    >
-                      {num}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('00')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-base text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    00
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('0')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    0
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('.')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    .
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('BACKSPACE')}
-                    className="h-11 bg-cream-200 hover:bg-cream-300 rounded-xl border border-cream-300 flex items-center justify-center gap-1.5 text-xs font-black text-brand-brown active:scale-95 transition-all"
-                  >
-                    <Delete className="w-4 h-4" />
-                    <span>Backspace</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('CLEAR')}
-                    className="h-11 bg-white hover:bg-rose-50 rounded-xl border border-rose-200 text-xs font-black text-rose-600 active:scale-95 transition-all"
-                  >
-                    Clear Amount
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* 2. CARD PAYMENT SCREEN */}
-          {paymentMethod === 'CARD' && (
-            <div className="max-w-md mx-auto space-y-5 text-center py-6">
-              <div className="w-18 h-18 rounded-3xl bg-brand-teal-light text-brand-teal flex items-center justify-center mx-auto shadow-sm">
-                <CreditCard className="w-9 h-9 stroke-[2]" />
-              </div>
-              <div>
-                <h3 className="font-black text-base sm:text-lg text-brand-brown-dark">
-                  Swipe / Tap Card on POS Terminal
-                </h3>
-                <p className="text-xs text-text-secondary mt-1">
-                  Card payments are tracked digitally and do not affect the physical cash drawer float.
-                </p>
-              </div>
-              <div className="text-left space-y-1.5 pt-2">
-                <label className="text-xs font-extrabold uppercase text-text-secondary">
-                  Optional Card Auth / Slip Reference #
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. VISA-9842"
-                  value={cardRef}
-                  onChange={(e) => setCardRef(e.target.value)}
-                  className="w-full px-4 py-2.5 bg-cream-50 border border-border rounded-xl font-mono text-xs font-bold focus:outline-none focus:ring-2 focus:ring-brand-teal/40"
-                  autoFocus
-                />
-              </div>
-            </div>
-          )}
-
-          {/* 3. SPLIT PAYMENT SCREEN */}
-          {paymentMethod === 'SPLIT' && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 sm:gap-6">
-              {/* Left Column: Selectable Split Input Cards & Helpers */}
-              <div className="space-y-3.5">
-                {/* Cash Split Field Card */}
-                <div
-                  onClick={() => selectSplitField('cash')}
-                  className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer ${
-                    activeSplitField === 'cash'
-                      ? 'border-brand-teal bg-white shadow-sm ring-2 ring-brand-teal/20'
-                      : 'border-border bg-cream-50/70 hover:bg-cream-100/80'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-black uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
-                      <Banknote className="w-4 h-4 text-brand-teal" /> Cash Tender
-                    </span>
-                    {activeSplitField === 'cash' && (
-                      <span className="text-[10px] font-black uppercase text-brand-teal bg-brand-teal-light px-2 py-0.5 rounded-md">
-                        Active Editing
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 flex items-baseline justify-between">
-                    <span className="text-sm font-bold text-text-secondary">Rs.</span>
-                    <input
-                      id="split-cash-input"
-                      type="text"
-                      placeholder="0.00"
-                      value={formatCommaInput(splitCashRupees)}
-                      onChange={(e) => setSplitCashRupees(e.target.value.replace(/,/g, ''))}
-                      onFocus={() => setActiveSplitField('cash')}
-                      onClick={(e) => (e.target as HTMLInputElement).select()}
-                      className="w-full text-right font-black text-2xl text-brand-brown-dark bg-transparent tabular-nums focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Card Split Field Card */}
-                <div
-                  onClick={() => selectSplitField('card')}
-                  className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer ${
-                    activeSplitField === 'card'
-                      ? 'border-brand-teal bg-white shadow-sm ring-2 ring-brand-teal/20'
-                      : 'border-border bg-cream-50/70 hover:bg-cream-100/80'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-black uppercase tracking-wider text-text-secondary flex items-center gap-1.5">
-                      <CreditCard className="w-4 h-4 text-brand-orange" /> Card Tender
-                    </span>
-                    {activeSplitField === 'card' && (
-                      <span className="text-[10px] font-black uppercase text-brand-teal bg-brand-teal-light px-2 py-0.5 rounded-md">
-                        Active Editing
-                      </span>
-                    )}
-                  </div>
-                  <div className="mt-1 flex items-baseline justify-between">
-                    <span className="text-sm font-bold text-text-secondary">Rs.</span>
-                    <input
-                      id="split-card-input"
-                      type="text"
-                      placeholder="0.00"
-                      value={formatCommaInput(splitCardRupees)}
-                      onChange={(e) => setSplitCardRupees(e.target.value.replace(/,/g, ''))}
-                      onFocus={() => setActiveSplitField('card')}
-                      onClick={(e) => (e.target as HTMLInputElement).select()}
-                      className="w-full text-right font-black text-2xl text-brand-brown-dark bg-transparent tabular-nums focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* Quick Split Helpers */}
-                <div>
-                  <label className="text-[11px] font-extrabold uppercase tracking-wider text-text-secondary">
-                    Quick Split Actions
-                  </label>
-                  <div className="grid grid-cols-2 gap-2 mt-1">
-                    <button
-                      type="button"
-                      onClick={handleSplit5050}
-                      className="py-2.5 px-3 rounded-xl border border-brand-teal/40 bg-brand-teal-light hover:bg-brand-teal hover:text-white text-xs font-black text-brand-teal transition-all active:scale-95 text-center shadow-xs"
-                    >
-                      50 / 50 Split
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleFillSplitBalance}
-                      className="py-2.5 px-3 rounded-xl border border-border bg-cream-50 hover:bg-cream-100 text-xs font-bold text-brand-brown-dark transition-all active:scale-95 text-center shadow-xs"
-                    >
-                      {activeSplitField === 'card' ? 'Fill Balance to Card' : 'Fill Balance to Cash'}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Split Balance Summary */}
-                {(() => {
-                  const c = rupeesToCents(splitCashRupees || '0');
-                  const cr = rupeesToCents(splitCardRupees || '0');
-                  const sum = c + cr;
-                  const remaining = totalCents - sum;
-
-                  return (
+              {/* TAB 3: SPLIT PAYMENT */}
+              {paymentMethod === 'SPLIT' && (
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-5 sm:gap-6 items-center">
+                  {/* Left Column: Split Allocations */}
+                  <div className="sm:col-span-6 space-y-3.5">
+                    {/* Cash Split Field */}
                     <div
-                      className={`p-3.5 rounded-2xl border text-xs font-bold flex items-center justify-between shadow-xs ${
-                        remaining === 0
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                          : remaining > 0
-                          ? 'bg-amber-50 border-amber-200 text-amber-800'
-                          : 'bg-rose-50 border-rose-200 text-rose-700'
+                      onClick={() => selectSplitField('cash')}
+                      className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer ${
+                        activeSplitField === 'cash'
+                          ? 'border-brand-teal bg-[#FAF7F2] ring-2 ring-brand-teal/20'
+                          : 'border-[#E0D7CC] bg-white hover:bg-[#FAF7F2]'
                       }`}
                     >
-                      <div className="flex items-center gap-2">
-                        {remaining === 0 && <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
-                        <span>
-                          {remaining === 0
-                            ? 'Exact Match Allocated'
-                            : remaining > 0
-                            ? 'Remaining to allocate:'
-                            : 'Over allocated:'}
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-black uppercase tracking-wider text-text-secondary flex items-center gap-2">
+                          <Banknote className="w-4 h-4 text-brand-teal" /> Cash Tender
                         </span>
+                        {activeSplitField === 'cash' && (
+                          <span className="text-[10px] font-black uppercase text-brand-teal bg-white px-2 py-0.5 rounded-md border border-brand-teal/30">
+                            Editing
+                          </span>
+                        )}
                       </div>
-                      <span className="tabular-nums font-black text-sm sm:text-base">
-                        {formatLKR(Math.abs(remaining))}
-                      </span>
+                      <div className="mt-1.5 flex items-baseline justify-between">
+                        <span className="text-base font-bold text-text-secondary">Rs.</span>
+                        <input
+                          id="split-cash-input"
+                          type="text"
+                          placeholder="0.00"
+                          value={formatCommaInput(splitCashRupees)}
+                          onChange={(e) => setSplitCashRupees(e.target.value.replace(/,/g, ''))}
+                          onFocus={() => setActiveSplitField('cash')}
+                          onClick={(e) => (e.target as HTMLInputElement).select()}
+                          className="w-full text-right font-mono font-black text-2xl text-brand-brown-dark bg-transparent tabular-nums focus:outline-none"
+                        />
+                      </div>
                     </div>
-                  );
-                })()}
-              </div>
 
-              {/* Right Column: Interactive Numpad */}
-              <div className="p-4 bg-cream-50/70 rounded-3xl border border-border/80 flex flex-col justify-between space-y-3">
-                <div className="grid grid-cols-3 gap-2">
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-                    <button
-                      key={num}
-                      type="button"
-                      onClick={() => handleNumpad(num.toString())}
-                      className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
+                    {/* Card Split Field */}
+                    <div
+                      onClick={() => selectSplitField('card')}
+                      className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer ${
+                        activeSplitField === 'card'
+                          ? 'border-brand-teal bg-[#FAF7F2] ring-2 ring-brand-teal/20'
+                          : 'border-[#E0D7CC] bg-white hover:bg-[#FAF7F2]'
+                      }`}
                     >
-                      {num}
-                    </button>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('00')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-base text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    00
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('0')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    0
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('.')}
-                    className="h-12 bg-white rounded-2xl border border-border/80 shadow-xs font-black text-xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all"
-                  >
-                    .
-                  </button>
-                </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-black uppercase tracking-wider text-text-secondary flex items-center gap-2">
+                          <CreditCard className="w-4 h-4 text-brand-orange" /> Card Tender
+                        </span>
+                        {activeSplitField === 'card' && (
+                          <span className="text-[10px] font-black uppercase text-brand-teal bg-white px-2 py-0.5 rounded-md border border-brand-teal/30">
+                            Editing
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex items-baseline justify-between">
+                        <span className="text-base font-bold text-text-secondary">Rs.</span>
+                        <input
+                          id="split-card-input"
+                          type="text"
+                          placeholder="0.00"
+                          value={formatCommaInput(splitCardRupees)}
+                          onChange={(e) => setSplitCardRupees(e.target.value.replace(/,/g, ''))}
+                          onFocus={() => setActiveSplitField('card')}
+                          onClick={(e) => (e.target as HTMLInputElement).select()}
+                          className="w-full text-right font-mono font-black text-2xl text-brand-brown-dark bg-transparent tabular-nums focus:outline-none"
+                        />
+                      </div>
+                    </div>
 
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('BACKSPACE')}
-                    className="h-11 bg-cream-200 hover:bg-cream-300 rounded-xl border border-cream-300 flex items-center justify-center gap-1.5 text-xs font-black text-brand-brown active:scale-95 transition-all"
-                  >
-                    <Delete className="w-4 h-4" />
-                    <span>Backspace</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleNumpad('CLEAR')}
-                    className="h-11 bg-white hover:bg-rose-50 rounded-xl border border-rose-200 text-xs font-black text-rose-600 active:scale-95 transition-all"
-                  >
-                    Clear Amount
-                  </button>
+                    {/* Quick Split Helpers */}
+                    <div className="grid grid-cols-2 gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleSplit5050}
+                        className="py-2.5 px-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-black text-brand-teal transition-all active:scale-95 text-center cursor-pointer shadow-2xs"
+                      >
+                        50 / 50 Split
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleFillSplitBalance}
+                        className="py-2.5 px-3.5 rounded-xl border border-[#E0D7CC] bg-[#FAF7F2] hover:bg-cream-100 text-xs sm:text-sm font-bold text-brand-brown-dark transition-all active:scale-95 text-center cursor-pointer shadow-2xs"
+                      >
+                        Fill Balance
+                      </button>
+                    </div>
+
+                    {/* Split Balance Summary */}
+                    {(() => {
+                      const c = rupeesToCents(splitCashRupees || '0');
+                      const cr = rupeesToCents(splitCardRupees || '0');
+                      const sum = c + cr;
+                      const remaining = totalCents - sum;
+
+                      return (
+                        <div className="pt-2.5 border-t border-[#EAE3DA] flex items-center justify-between text-xs sm:text-sm font-bold">
+                          <span className="text-text-muted">
+                            {remaining === 0
+                              ? 'Allocation Complete'
+                              : remaining > 0
+                              ? 'Remaining to Allocate:'
+                              : 'Over Allocated:'}
+                          </span>
+                          <span
+                            className={`font-mono font-black text-base sm:text-lg tabular-nums ${
+                              remaining === 0
+                                ? 'text-emerald-700'
+                                : remaining > 0
+                                ? 'text-amber-800'
+                                : 'text-rose-700'
+                            }`}
+                          >
+                            {formatLKR(Math.abs(remaining))}
+                          </span>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  {/* Right Column: Tactile Numpad (No container bg/border, larger keys) */}
+                  <div className="sm:col-span-6 p-1 sm:p-2 space-y-3.5 flex flex-col justify-center">
+                    <div className="grid grid-cols-3 gap-3 sm:gap-4 place-items-center">
+                      {['7', '8', '9', '4', '5', '6', '1', '2', '3'].map((num) => (
+                        <button
+                          key={num}
+                          type="button"
+                          onClick={() => handleNumpad(num)}
+                          className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                        >
+                          {num}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('CLEAR')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-rose-200 shadow-2xs font-bold text-xs sm:text-sm text-rose-700 hover:bg-rose-50 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('0')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        0
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('.')}
+                        className="w-15 h-15 sm:w-16 sm:h-16 rounded-full bg-white border border-[#E0D7CC] shadow-2xs font-mono font-black text-2xl sm:text-3xl text-brand-brown-dark hover:bg-cream-100 active:scale-95 transition-all cursor-pointer flex items-center justify-center"
+                      >
+                        .
+                      </button>
+                    </div>
+
+                    <div className="pt-2.5 border-t border-[#EAE3DA]">
+                      <button
+                        type="button"
+                        onClick={() => handleNumpad('BACKSPACE')}
+                        className="w-full h-12 sm:h-13 bg-white hover:bg-cream-100 rounded-full border border-[#E0D7CC] flex items-center justify-center gap-2 text-xs sm:text-sm font-black text-brand-brown-dark active:scale-95 transition-all cursor-pointer shadow-2xs"
+                      >
+                        <Delete className="w-4 h-4 sm:w-5 sm:h-5" />
+                        <span>Backspace</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
-          )}
-        </div>
 
-        {/* Footer Actions */}
-        <div className="p-4 sm:p-5 bg-cream-50 border-t border-border/80 flex items-center justify-between gap-3">
-          <button
-            onClick={onClose}
-            className="px-5 py-3 rounded-2xl border border-border text-xs font-black text-text-secondary hover:bg-cream-200 transition-colors"
-          >
-            Back to Order
-          </button>
+            {/* 3. Bottom Pinned Footer: Back to Order & Complete Payment (Equal Sizing) */}
+            <div className="p-4 sm:p-5 bg-[#FAF7F2] border-t border-[#EAE3DA] grid grid-cols-2 gap-3 sm:gap-4 shrink-0">
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-full h-14 sm:h-16 rounded-2xl border-2 border-[#E0D7CC] bg-white text-sm sm:text-base font-black text-brand-brown-dark hover:bg-cream-100 transition-all cursor-pointer active:scale-95 shadow-2xs flex items-center justify-center"
+              >
+                Back to Order
+              </button>
 
-          <button
-            id="complete-payment-button"
-            onClick={handleCompletePayment}
-            className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-brand-teal hover:bg-brand-teal-dark text-white font-black text-sm sm:text-base shadow-teal transition-all active:scale-[0.98]"
-          >
-            <CheckCircle2 className="w-5 h-5" />
-            <span>COMPLETE PAYMENT</span>
-            <span className="opacity-60">•</span>
-            <span className="tabular-nums">{formatLKR(totalCents)}</span>
-          </button>
+              <button
+                type="button"
+                id="complete-payment-button"
+                onClick={handleCompletePayment}
+                className="w-full h-14 sm:h-16 rounded-2xl bg-brand-teal hover:bg-brand-teal-dark text-white font-black text-sm sm:text-base shadow-teal transition-all active:scale-[0.98] cursor-pointer flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className="w-5 h-5 sm:w-6 sm:h-6 shrink-0" />
+                <span>COMPLETE PAYMENT</span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
+
+      {/* Customer Loyalty & Points Redemption Modal */}
+      <CustomerLoyaltyModal
+        isOpen={isLoyaltyModalOpen}
+        onClose={() => setIsLoyaltyModalOpen(false)}
+        orderTotalCents={subtotalCents}
+        subtotalCents={subtotalCents}
+        currentCustomer={
+          customerName
+            ? {
+                id: customerId,
+                name: customerName,
+                phone: customerPhone,
+                pointsRedeemed: loyaltyPointsRedeemed,
+                discountCents: loyaltyDiscountCents,
+              }
+            : null
+        }
+        onSelectCustomer={(cust: Customer, pointsToRedeem = 0, discount = 0) => {
+          setCustomerInfo(cust.name, cust.phone, cust.id);
+          if (pointsToRedeem > 0) {
+            setLoyaltyRedemption(pointsToRedeem, discount);
+          } else {
+            clearLoyaltyRedemption();
+          }
+        }}
+        onRemoveCustomer={() => {
+          setCustomerInfo('', '', '');
+          clearLoyaltyRedemption();
+          toast.info('Customer detached from order');
+        }}
+      />
     </div>
   );
 };
