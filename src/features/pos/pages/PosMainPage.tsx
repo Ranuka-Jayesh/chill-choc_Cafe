@@ -8,6 +8,7 @@ import { catalogService } from '@/services/catalogService';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { soundService } from '@/services/soundService';
 import { db } from '@/services/storage/db';
+import { receiptSocketService } from '@/services/receiptSocketService';
 import { Product, Order, CashierShift } from '@/types';
 import { toast } from 'sonner';
 
@@ -133,12 +134,17 @@ export const PosMainPage: React.FC = () => {
       refreshData();
     });
 
+    const unsubReceipt = receiptSocketService.subscribeReceiptUpdates(() => {
+      refreshData();
+    });
+
     return () => {
       unsubDb();
       unsubCatalog();
       unsubStock();
       unsubShift();
       unsubSettings();
+      unsubReceipt();
     };
   }, [session, navigate]);
 

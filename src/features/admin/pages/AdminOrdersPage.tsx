@@ -120,7 +120,7 @@ export const AdminOrdersPage: React.FC = () => {
       { value: 'ALL', label: 'All Statuses' },
       {
         value: 'REFUND_PENDING',
-        label: pendingRefundCount > 0 ? `⚠️ Refund Requests (${pendingRefundCount})` : 'Refund Requests',
+        label: pendingRefundCount > 0 ? `Refund Requests (${pendingRefundCount})` : 'Refund Requests',
       },
       { value: 'COMPLETED', label: 'Completed' },
       { value: 'REFUNDED', label: 'Refunded' },

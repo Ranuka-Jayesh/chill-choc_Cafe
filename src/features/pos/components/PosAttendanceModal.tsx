@@ -476,7 +476,7 @@ export const PosAttendanceModal: React.FC<PosAttendanceModalProps> = ({ isOpen, 
 
               <div className="space-y-2">
                 <span className="px-3 py-1 rounded-full bg-purple-100 text-purple-800 text-[11px] font-black uppercase tracking-wider border border-purple-200">
-                  🎉 Overtime Completed!
+                  Overtime Completed!
                 </span>
                 <h3 className="font-black text-xl sm:text-2xl text-brand-brown-dark leading-tight pt-1">
                   Thank You, {celebrationData.employeeName}!
@@ -509,7 +509,7 @@ export const PosAttendanceModal: React.FC<PosAttendanceModalProps> = ({ isOpen, 
                 onClick={() => setCelebrationData(null)}
                 className="w-full py-3.5 bg-gradient-to-r from-purple-700 to-indigo-700 hover:from-purple-800 hover:to-indigo-800 text-white rounded-2xl font-black text-xs uppercase tracking-wider shadow-lg shadow-purple-200 active:scale-95 transition-all cursor-pointer"
               >
-                Wonderful, Thank You! ✨
+                Wonderful, Thank You!
               </button>
             </div>
           </div>,

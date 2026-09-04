@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { BrandLogo } from '@/components/brand/BrandLogo';
 import { db } from '@/services/storage/db';
-import { inventoryService } from '@/services/inventoryService';
+import { inventoryService, getSupplierAvailableIngredients } from '@/services/inventoryService';
 import { catalogService } from '@/services/catalogService';
 import { authService } from '@/services/authService';
 import { shiftService } from '@/services/shiftService';
@@ -105,6 +105,7 @@ export const PosStockPage: React.FC = () => {
   const [adjustType, setAdjustType] = useState<'ADD' | 'DEDUCT' | 'EXACT'>('ADD');
   const [adjustQuantity, setAdjustQuantity] = useState<number>(1);
   const [adjustReason, setAdjustReason] = useState<string>('Physical stock inventory audit');
+  const [adjustExpiry, setAdjustExpiry] = useState<string>('');
 
   const selectedAdjustIng = useMemo(
     () => ingredients.find((i) => i.id === adjustIngredientId) || ingredients[0],
@@ -140,14 +141,10 @@ export const PosStockPage: React.FC = () => {
   const activeSuppliers = useMemo(() => suppliers.filter((s) => s.active !== false), [suppliers]);
 
   // Ingredients available according to selected supplier
-  const availableIngredients = useMemo(() => {
-    if (!selectedSupplierId) return ingredients;
-    const sup = suppliers.find((s) => s.id === selectedSupplierId);
-    if (!sup) return ingredients;
-
-    const linkedIngs = ingredients.filter((i) => i.supplierId === sup.id);
-    return linkedIngs.length > 0 ? linkedIngs : ingredients;
-  }, [selectedSupplierId, suppliers, ingredients]);
+  const availableIngredients = useMemo(
+    () => getSupplierAvailableIngredients(selectedSupplierId, suppliers, ingredients),
+    [selectedSupplierId, suppliers, ingredients]
+  );
 
   // Sync with database updates & realtime socket events
   useEffect(() => {
@@ -236,13 +233,39 @@ export const PosStockPage: React.FC = () => {
     });
   }, [movements, search, dateRange]);
 
-  // Filtered Purchases
+  // Filtered Purchases - Rolls forward unpaid POs into next months until paid
   const filteredPurchases = useMemo(() => {
     return purchases.filter((po) => {
       if (dateRange.year !== 'ALL') {
         const pDate = new Date(po.purchaseDate);
-        if (String(pDate.getFullYear()) !== dateRange.year) return false;
-        if (dateRange.month !== 'ALL' && String(pDate.getMonth() + 1) !== dateRange.month) return false;
+        const pYear = pDate.getFullYear();
+        const pMonth = pDate.getMonth() + 1;
+        const targetYear = parseInt(dateRange.year, 10);
+        const targetMonth = dateRange.month !== 'ALL' ? parseInt(dateRange.month, 10) : null;
+
+        if (targetMonth === null) {
+          // Whole year selected
+          const isSameYear = pYear === targetYear;
+          const isPriorYearUnpaid = pYear < targetYear && ((po.dueCents ?? 0) > 0 || po.paymentStatus !== 'PAID');
+          if (!isSameYear && !isPriorYearUnpaid) return false;
+        } else {
+          // Specific Year & Month selected (e.g. September 2026)
+          const isCreatedInSelectedMonth = pYear === targetYear && pMonth === targetMonth;
+          const isPriorMonth = pYear < targetYear || (pYear === targetYear && pMonth < targetMonth);
+
+          // 1. Unpaid / partially paid records roll forward into next months until marked paid!
+          const hasOutstandingDue = (po.dueCents ?? 0) > 0 || po.paymentStatus !== 'PAID';
+
+          // 2. Also show if paid during this selected month
+          const wasPaidInSelectedMonth = (po.payments || []).some((pm) => {
+            if (!pm.timestamp) return false;
+            const pmDate = new Date(pm.timestamp);
+            return pmDate.getFullYear() === targetYear && pmDate.getMonth() + 1 === targetMonth;
+          });
+
+          const shouldShow = isCreatedInSelectedMonth || (isPriorMonth && (hasOutstandingDue || wasPaidInSelectedMonth));
+          if (!shouldShow) return false;
+        }
       }
       if (search.trim()) {
         const q = search.toLowerCase();
@@ -344,9 +367,12 @@ export const PosStockPage: React.FC = () => {
     if (ing) {
       setAdjustIngredientId(ing.id);
       setIsSpecificIngredientAdjust(true);
+      setAdjustExpiry(ing.expiryDate || '');
     } else {
-      setAdjustIngredientId(ingredients[0]?.id || '');
+      const first = ingredients[0];
+      setAdjustIngredientId(first?.id || '');
       setIsSpecificIngredientAdjust(false);
+      setAdjustExpiry(first?.expiryDate || '');
     }
     setAdjustType('ADD');
     setAdjustQuantity(1);
@@ -383,6 +409,9 @@ export const PosStockPage: React.FC = () => {
         ? `(-${adjustQuantity} ${targetIng.unit})`
         : `(Count = ${adjustQuantity} ${targetIng.unit})`;
 
+    // If not entered, fallback to current ingredient expiry date
+    const finalExpiry = adjustExpiry.trim() || targetIng.expiryDate;
+
     try {
       inventoryService.requestStockAdjustment({
         ingredientId: targetIng.id,
@@ -390,6 +419,7 @@ export const PosStockPage: React.FC = () => {
         currentStock: targetIng.currentStock,
         requestedStock: finalNewStock,
         unit: targetIng.unit,
+        expiryDate: finalExpiry || undefined,
         reason: `${adjustReason.trim() || 'Physical inventory audit'} ${actionText}`,
         userId: currentCashier?.id || 'cashier',
         userName: currentCashier?.name || 'Cashier',
@@ -409,6 +439,7 @@ export const PosStockPage: React.FC = () => {
   // Handlers for Receive Stock / Purchase
   const handleOpenReceiveModal = () => {
     setSuppliers(catalogService.getSuppliers());
+    setIngredients(inventoryService.getIngredients());
     setSelectedSupplierId('');
     setVendorName('');
     setInvoiceNumber(`INV-${Date.now().toString().slice(-4)}`);
@@ -430,10 +461,14 @@ export const PosStockPage: React.FC = () => {
   };
 
   const handleAddPurchaseItem = () => {
-    const list = availableIngredients.length > 0 ? availableIngredients : ingredients;
+    const list = availableIngredients;
     const first = list[0];
     if (!first) {
-      toast.error('No ingredients available.');
+      toast.error(
+        selectedSupplierId
+          ? 'No items registered for this supplier. Please configure supplied items in Suppliers & Payables.'
+          : 'No ingredients available.'
+      );
       return;
     }
     const newItemTotalCents = first.averageCostCents || 50000;
@@ -473,8 +508,10 @@ export const PosStockPage: React.FC = () => {
       const item = { ...next[index], ...updates };
 
       if (updates.ingredientId) {
-        const list = availableIngredients.length > 0 ? availableIngredients : ingredients;
-        const found = list.find((i) => i.id === updates.ingredientId);
+        const list = availableIngredients;
+        const found =
+          list.find((i) => i.id === updates.ingredientId) ||
+          ingredients.find((i) => i.id === updates.ingredientId);
         if (found) {
           item.ingredientName = found.name;
           item.unit = found.unit;
@@ -598,6 +635,7 @@ export const PosStockPage: React.FC = () => {
         chequeNumber: chequeNumber.trim(),
         bankName: chequeBank.trim(),
         chequeDate,
+        chequeStatus: 'PENDING',
         timestamp: nowISO,
       });
     }
@@ -615,7 +653,7 @@ export const PosStockPage: React.FC = () => {
         payments,
         duePaymentDate: balanceDueCents > 0 ? duePaymentDate : undefined,
         notes: purchaseNotes.trim() || undefined,
-        reason: purchaseNotes.trim() || `Goods Inward Intake (${purchaseItems.length} lines from ${supplierName})`,
+        reason: purchaseNotes.trim() || `Goods Inward Intake (${purchaseItems.length === 1 ? purchaseItems[0].ingredientName : `${purchaseItems.length} items`} from ${supplierName})`,
         userId: currentCashier?.id || 'cashier',
         userName: currentCashier?.name || 'Cashier',
       });
@@ -821,7 +859,7 @@ export const PosStockPage: React.FC = () => {
                 activeTab === 'purchases' ? 'bg-white/20 text-white' : 'bg-cream-100 text-brand-brown-dark'
               }`}
             >
-              {purchases.length}
+              {filteredPurchases.length}
             </span>
           </button>
 
@@ -1475,7 +1513,11 @@ export const PosStockPage: React.FC = () => {
                     ) : (
                       <select
                         value={adjustIngredientId}
-                        onChange={(e) => setAdjustIngredientId(e.target.value)}
+                        onChange={(e) => {
+                          setAdjustIngredientId(e.target.value);
+                          const chosen = ingredients.find((i) => i.id === e.target.value);
+                          setAdjustExpiry(chosen?.expiryDate || '');
+                        }}
                         className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
                         required
                       >
@@ -1561,6 +1603,28 @@ export const PosStockPage: React.FC = () => {
                   </div>
 
                   <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block">
+                        Expiry Date (Optional)
+                      </label>
+                      {selectedAdjustIng?.expiryDate && (
+                        <span className="text-[10px] text-brand-teal font-mono font-bold">
+                          Current: {selectedAdjustIng.expiryDate}
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="date"
+                      value={adjustExpiry}
+                      onChange={(e) => setAdjustExpiry(e.target.value)}
+                      className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-mono font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
+                    />
+                    <p className="text-[10px] text-text-muted mt-1">
+                      Optional. If left blank, will keep current expiry date ({selectedAdjustIng?.expiryDate || 'None'}).
+                    </p>
+                  </div>
+
+                  <div>
                     <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
                       Audit Reason / Note <span className="text-status-danger">*</span>
                     </label>
@@ -1642,6 +1706,26 @@ export const PosStockPage: React.FC = () => {
                           setSelectedSupplierId(supId);
                           const sup = suppliers.find((s) => s.id === supId);
                           setVendorName(sup ? sup.name : '');
+                          const newAvail = getSupplierAvailableIngredients(supId, suppliers, ingredients);
+                          setPurchaseItems((prev) => {
+                            if (prev.length === 0) return prev;
+                            if (newAvail.length === 0) return [];
+                            return prev.map((item) => {
+                              const isValid = newAvail.some((ing) => ing.id === item.ingredientId);
+                              if (!isValid) {
+                                const first = newAvail[0];
+                                return {
+                                  ...item,
+                                  ingredientId: first.id,
+                                  ingredientName: first.name,
+                                  unit: first.unit,
+                                  unitPriceCents: first.averageCostCents || 50000,
+                                  totalCents: Math.round(item.quantity * (first.averageCostCents || 50000)),
+                                };
+                              }
+                              return item;
+                            });
+                          });
                         }}
                         className="w-full p-2 bg-[#FAF7F2] border border-[#E2D8CC] rounded-xl text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal cursor-pointer"
                       >
@@ -1768,11 +1852,17 @@ export const PosStockPage: React.FC = () => {
                                   onChange={(e) => handleUpdatePurchaseItem(idx, { ingredientId: e.target.value })}
                                   className="w-full p-2 bg-[#FAF7F2] border border-[#E2D8CC] rounded-xl text-xs font-bold text-brand-brown-dark outline-none focus:border-brand-teal focus:bg-white cursor-pointer"
                                 >
-                                  {availableIngredients.map((ing) => (
-                                    <option key={ing.id} value={ing.id}>
-                                      {ing.name} ({ing.unit})
+                                  {availableIngredients.length === 0 ? (
+                                    <option value="" disabled>
+                                      -- No items registered for this supplier --
                                     </option>
-                                  ))}
+                                  ) : (
+                                    availableIngredients.map((ing) => (
+                                      <option key={ing.id} value={ing.id}>
+                                        {ing.name} ({ing.unit})
+                                      </option>
+                                    ))
+                                  )}
                                 </select>
                               </td>
                               <td className="py-2.5 px-2">
@@ -2529,10 +2619,213 @@ export const PosStockPage: React.FC = () => {
       })()}
 
       {/* ========================================================================= */}
-      {/* 9. MODAL: VIEW STOCK REQUEST DETAILS (3-COLUMN STUDIO CARD PATTERN)        */}
+      {/* 9. MODAL: VIEW STOCK REQUEST DETAILS                                       */}
       {/* ========================================================================= */}
       {viewingRequest && (() => {
         const isDelivery = viewingRequest.type === 'STOCK_DELIVERY';
+
+        // -------------------------------------------------------------------
+        // 1. FOR STOCK ADJUSTMENTS: Use the clean, compact Record Stock Adjustment modal
+        // -------------------------------------------------------------------
+        if (!isDelivery) {
+          const reqIng = ingredients.find((i) => i.id === viewingRequest.ingredientId);
+          const actionType =
+            viewingRequest.quantityChange > 0
+              ? 'ADD'
+              : viewingRequest.quantityChange < 0
+              ? 'DEDUCT'
+              : 'EXACT';
+
+          const targetQty =
+            viewingRequest.requestedStock !== undefined
+              ? viewingRequest.requestedStock
+              : Number((viewingRequest.currentStock + viewingRequest.quantityChange).toFixed(2));
+
+          const curStock = viewingRequest.currentStock;
+          const calculatedFinal = targetQty;
+          const calculatedDiff = viewingRequest.quantityChange;
+
+          return createPortal(
+            <div className="fixed inset-0 z-[99999] w-full h-full bg-black/60 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-hidden animate-in fade-in">
+              <div className="w-full max-w-lg sm:max-w-xl flex flex-col max-h-[92vh]">
+                {/* Header matching Record Stock Adjustment modal */}
+                <div className="flex items-center justify-between gap-3 mb-3 px-1 shrink-0">
+                  <div className="min-w-0 flex-1 flex items-center gap-2">
+                    <h3 className="font-extrabold text-base sm:text-lg text-white drop-shadow-xs truncate">
+                      Record Stock Adjustment
+                    </h3>
+                    <span
+                      className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border shadow-xs ${
+                        viewingRequest.status === 'PENDING_APPROVAL'
+                          ? 'bg-amber-100 text-amber-900 border-amber-300'
+                          : viewingRequest.status === 'APPROVED'
+                          ? 'bg-status-success-bg text-status-success border-status-success/30'
+                          : 'bg-rose-100 text-rose-900 border-rose-300'
+                      }`}
+                    >
+                      {viewingRequest.status === 'PENDING_APPROVAL'
+                        ? 'Waiting for Admin'
+                        : viewingRequest.status === 'APPROVED'
+                        ? 'Approved'
+                        : 'Rejected'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setViewingRequest(null)}
+                      className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+
+                {/* White rounded-3xl card */}
+                <div className="w-full bg-white rounded-3xl shadow-2xl border border-[#E9E0D5] overflow-y-auto">
+                  <div className="p-5 sm:p-6 space-y-4">
+                    {/* Field 1: RAW INGREDIENT */}
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                        Raw Ingredient <span className="text-status-danger">*</span>
+                      </label>
+                      <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span>{viewingRequest.ingredientName}</span>
+                          {(reqIng?.sku || viewingRequest.sku) && (
+                            <span className="text-[10px] font-mono font-semibold text-text-muted bg-cream-100 px-1.5 py-0.5 rounded">
+                              {reqIng?.sku || viewingRequest.sku}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-bold text-brand-teal">
+                          At Request: {viewingRequest.currentStock} {viewingRequest.unit}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Field 2: ADJUSTMENT ACTION */}
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1.5">
+                        Adjustment Action
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div
+                          className={`py-2 rounded-xl text-xs font-extrabold text-center border select-none ${
+                            actionType === 'ADD'
+                              ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                              : 'bg-[#FAF7F2] text-text-muted border-[#E0D7CC] opacity-60'
+                          }`}
+                        >
+                          + Add Stock
+                        </div>
+                        <div
+                          className={`py-2 rounded-xl text-xs font-extrabold text-center border select-none ${
+                            actionType === 'DEDUCT'
+                              ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                              : 'bg-[#FAF7F2] text-text-muted border-[#E0D7CC] opacity-60'
+                          }`}
+                        >
+                          – Deduct / Waste
+                        </div>
+                        <div
+                          className={`py-2 rounded-xl text-xs font-extrabold text-center border select-none ${
+                            actionType === 'EXACT'
+                              ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                              : 'bg-[#FAF7F2] text-text-muted border-[#E0D7CC] opacity-60'
+                          }`}
+                        >
+                          = Exact Count
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Field 3: QUANTITY TO ADJUST */}
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                        Quantity to Adjust ({viewingRequest.unit})
+                      </label>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-10 px-3 bg-cream-50/60 border border-[#E2D8CC] rounded-2xl flex items-center justify-center text-center text-base font-black text-brand-brown-dark">
+                          {actionType === 'EXACT' ? calculatedFinal : Math.abs(calculatedDiff)} {viewingRequest.unit}
+                        </div>
+                      </div>
+
+                      {/* Stock Transition Details */}
+                      <div className="flex items-center justify-between text-xs font-bold text-text-secondary pt-1.5 px-0.5">
+                        <span>
+                          Stock change: {curStock} {viewingRequest.unit} →{' '}
+                          <strong className="text-brand-brown-deep font-black">
+                            {calculatedFinal} {viewingRequest.unit}
+                          </strong>
+                        </span>
+                        <span
+                          className={
+                            calculatedDiff >= 0
+                              ? 'text-status-success font-black'
+                              : 'text-status-danger font-black'
+                          }
+                        >
+                          ({calculatedDiff >= 0 ? `+${calculatedDiff}` : calculatedDiff} {viewingRequest.unit})
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Field 4: EXPIRY DATE */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-bold uppercase text-text-secondary block">
+                          Expiry Date
+                        </label>
+                        {(viewingRequest.expiryDate || reqIng?.expiryDate) && (
+                          <span className="text-[10px] text-brand-teal font-mono font-bold">
+                            {viewingRequest.expiryDate ? 'Specified by Cashier' : 'Current Default'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-mono font-bold text-brand-brown-dark">
+                        {viewingRequest.expiryDate || reqIng?.expiryDate || 'No Expiry Date Set'}
+                      </div>
+                    </div>
+
+                    {/* Field 5: AUDIT REASON / NOTE */}
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                        Audit Reason / Note <span className="text-status-danger">*</span>
+                      </label>
+                      <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark">
+                        {viewingRequest.reason}
+                      </div>
+                      <div className="flex items-center justify-between text-[11px] text-text-muted pt-2 px-0.5">
+                        <span>
+                          Ref: <strong className="font-mono text-brand-brown-dark">{viewingRequest.requestNumber}</strong>
+                        </span>
+                        <span>
+                          Submitted: {formatDateTime(viewingRequest.createdAt)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* If Rejection Note */}
+                    {viewingRequest.rejectionReason && (
+                      <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-800">
+                        <div className="font-bold text-[11px] uppercase tracking-wider mb-0.5 text-rose-900">
+                          Declined By Administrator
+                        </div>
+                        <div>{viewingRequest.rejectionReason}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body
+          );
+        }
+
+        // -------------------------------------------------------------------
+        // 2. FOR GOODS DELIVERIES / PURCHASES: Keep the full 3-column studio form
+        // -------------------------------------------------------------------
         const totalCostCents = viewingRequest.totalCents ?? viewingRequest.costCents ?? 0;
         const effectivePaidCents = viewingRequest.paidCents ?? (viewingRequest.paymentStatus === 'PAID' ? totalCostCents : 0);
         const effectiveDueCents = viewingRequest.dueCents ?? Math.max(0, totalCostCents - effectivePaidCents);
@@ -2582,7 +2875,7 @@ export const PosStockPage: React.FC = () => {
                     Request {viewingRequest.requestNumber}
                   </h3>
                   <span className="text-[11px] font-bold text-white/70 bg-white/10 px-2.5 py-0.5 rounded-full backdrop-blur-xs hidden sm:inline-block shrink-0">
-                    {isDelivery ? 'Goods Inward Voucher' : 'Stock Adjustment Voucher'}
+                    Goods Inward Voucher
                   </span>
                   <span
                     className={`text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full border shadow-xs ${

@@ -5,7 +5,7 @@ import { Order } from '@/types';
 import { db } from '@/services/storage/db';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { formatLKR, formatDateTime } from '@/utils/format';
-import { History, X, Printer, Utensils, RotateCcw, Search, Clock } from 'lucide-react';
+import { History, X, Printer, Utensils, RotateCcw, Search, Clock, Zap, Receipt } from 'lucide-react';
 import { toast } from 'sonner';
 
 interface OrdersHistoryDrawerProps {
@@ -120,6 +120,8 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
     }
   };
 
+
+
   return (
     <div
       onClick={onClose}
@@ -169,7 +171,9 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
               return (
                 <div
                   key={order.id}
-                  className="p-3.5 bg-cream-50/50 rounded-2xl border border-border space-y-2 hover:border-brand-teal/40 transition-colors"
+                  onClick={() => onViewReceipt(order)}
+                  className="p-3.5 bg-cream-50/50 rounded-2xl border border-border space-y-2 hover:border-brand-teal/50 hover:bg-cream-100/30 transition-all cursor-pointer select-none"
+                  title="Click to view receipt"
                 >
                   <div className="flex items-start justify-between">
                     <div>
@@ -210,19 +214,22 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
                   </div>
 
                   {/* Actions */}
-                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-cream-200">
+                  <div className="flex items-center justify-end gap-2 pt-1 border-t border-cream-200" onClick={(e) => e.stopPropagation()}>
                     <button
+                      type="button"
                       onClick={() => onViewKOT(order)}
-                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-brand-brown bg-white border border-border rounded-lg hover:bg-cream-100"
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-brand-brown bg-white border border-border rounded-lg hover:bg-cream-100 cursor-pointer"
                     >
                       <Utensils className="w-3 h-3 text-brand-orange" />
                       KOT
                     </button>
                     <button
+                      type="button"
                       onClick={() => onViewReceipt(order)}
-                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-brand-teal-dark bg-brand-teal-light border border-brand-teal/30 rounded-lg hover:bg-brand-teal hover:text-white transition-colors"
+                      className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-brand-teal-dark bg-brand-teal-light border border-brand-teal/30 rounded-lg hover:bg-brand-teal hover:text-white transition-colors cursor-pointer"
+                      title="View receipt preview (print directly from preview)"
                     >
-                      <Printer className="w-3 h-3" />
+                      <Receipt className="w-3 h-3" />
                       Receipt
                     </button>
                     {isRefundPending ? (
@@ -232,8 +239,9 @@ export const OrdersHistoryDrawer: React.FC<OrdersHistoryDrawerProps> = ({
                       </span>
                     ) : !isRefunded ? (
                       <button
+                        type="button"
                         onClick={() => handleRefund(order)}
-                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-status-danger bg-white border border-status-danger/30 rounded-lg hover:bg-status-danger-bg transition-colors"
+                        className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-status-danger bg-white border border-status-danger/30 rounded-lg hover:bg-status-danger-bg transition-colors cursor-pointer"
                       >
                         <RotateCcw className="w-3 h-3" />
                         Refund

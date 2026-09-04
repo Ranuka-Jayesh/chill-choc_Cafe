@@ -1,22 +1,98 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Order } from '@/types';
+import { Order, ReceiptCustomizationSettings, SystemSettings } from '@/types';
 import { db } from '@/services/storage/db';
+import { receiptSocketService } from '@/services/receiptSocketService';
 import { formatLKR, formatDateTime } from '@/utils/format';
-import { Printer, CheckCircle2, X } from 'lucide-react';
+import { Printer, CheckCircle2, X, Zap } from 'lucide-react';
 import { toast } from 'sonner';
+import { printThermalElement } from '@/utils/printThermal';
+import { directPrintService } from '@/services/directPrintService';
 
 interface ThermalReceiptModalProps {
   order: Order | null;
   isOpen: boolean;
   onClose: () => void;
+  autoPrint?: boolean;
 }
 
 export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
   order,
   isOpen,
   onClose,
+  autoPrint = false,
 }) => {
+  const [settings, setSettings] = useState<SystemSettings>(() => db.getSnapshot().settings);
+  const [receiptCustom, setReceiptCustom] = useState<ReceiptCustomizationSettings | undefined>(
+    () => db.getSnapshot().settings.receiptCustomization
+  );
+
+  useEffect(() => {
+    // 1. Listen to real-time WebSocket receipt design updates
+    const unsubSocket = receiptSocketService.subscribeReceiptUpdates((newCustom) => {
+      setReceiptCustom(newCustom);
+      setSettings((prev) => ({
+        ...prev,
+        businessName: newCustom.businessName !== undefined ? newCustom.businessName : prev.businessName,
+        tagline: newCustom.tagline !== undefined ? newCustom.tagline : prev.tagline,
+        address: newCustom.address !== undefined ? newCustom.address : prev.address,
+        phone: newCustom.phone !== undefined ? newCustom.phone : prev.phone,
+        receiptFooter: newCustom.receiptFooter !== undefined ? newCustom.receiptFooter : prev.receiptFooter,
+        receiptCustomization: newCustom,
+      }));
+    });
+
+    // 2. Listen to database changes synced via Supabase Realtime
+    const unsubDb = db.subscribe(() => {
+      const snap = db.getSnapshot().settings;
+      setSettings(snap);
+      if (snap.receiptCustomization) {
+        setReceiptCustom(snap.receiptCustomization);
+      }
+    });
+
+    return () => {
+      unsubSocket();
+      unsubDb();
+    };
+  }, []);
+
+  // Whenever modal opens, immediately refresh latest settings from local storage & memory
+  useEffect(() => {
+    if (isOpen) {
+      db.syncFromStorage();
+      const snap = db.getSnapshot().settings;
+      setSettings(snap);
+      if (snap.receiptCustomization) {
+        setReceiptCustom(snap.receiptCustomization);
+      }
+    }
+  }, [isOpen]);
+
+  const [isPrinting, setIsPrinting] = useState(false);
+
+  const handlePrint = async () => {
+    if (isPrinting || !order) return;
+    setIsPrinting(true);
+    try {
+      if (directPrintService.isEnabled()) {
+        const res = await directPrintService.printCustomerReceipt(order, { forceReprint: true });
+        if (res.success) {
+          toast.success(`Printed directly to ${directPrintService.getSelectedPrinter()}!`, { icon: '🖨️' });
+          return;
+        }
+        toast.info(`Direct printer unavailable (${res.message || 'offline'}). Opening standard print.`);
+      }
+      // Automatic fallback to browser print dialog
+      printThermalElement('printable-receipt');
+    } catch (err) {
+      console.warn('Direct print error, falling back to browser print:', err);
+      printThermalElement('printable-receipt');
+    } finally {
+      setIsPrinting(false);
+    }
+  };
+
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -24,20 +100,27 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
         e.preventDefault();
         e.stopPropagation();
         onClose();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        handlePrint();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
+  useEffect(() => {
+    if (!isOpen || !order || !autoPrint) return;
+    // Only auto-trigger browser iframe print if direct printing is DISABLED and autoPrint is explicitly requested
+    if (settings.autoPrintReceipt && !settings.directPrintEnabled) {
+      const t = setTimeout(() => {
+        printThermalElement('printable-receipt');
+      }, 400);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen, order, autoPrint, settings.autoPrintReceipt, settings.directPrintEnabled]);
+
   if (!isOpen || !order || typeof document === 'undefined') return null;
-
-  const settings = db.getSnapshot().settings;
-
-  const handlePrint = () => {
-    window.print();
-    toast.success('Sent receipt to thermal printer.');
-  };
 
   const handleCopy = () => {
     const lines = [
@@ -58,7 +141,16 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
     toast.success('Receipt text copied to clipboard.');
   };
 
-  const custom = settings.receiptCustomization;
+  const custom = receiptCustom || settings.receiptCustomization;
+  const displayBusinessName =
+    custom?.businessName !== undefined ? custom.businessName : settings.businessName;
+  const displayTagline =
+    custom?.tagline !== undefined ? custom.tagline : settings.tagline;
+  const displayAddress =
+    custom?.address !== undefined ? custom.address : settings.address;
+  const displayPhone =
+    custom?.phone !== undefined ? custom.phone : settings.phone;
+
   const showLogo = custom ? custom.showLogo : true;
   const logoUrl = custom?.logoUrl || '/logobg.webp';
   const logoWidthPx = custom?.logoWidthPx || 95;
@@ -72,6 +164,50 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
     ? 'border-b border-zinc-400'
     : 'border-b border-dashed border-zinc-400';
   const paperWidthClass = custom?.paperWidthMm === 58 ? 'max-w-[280px]' : 'max-w-[340px] sm:max-w-[360px]';
+
+  const getHeading1Class = () => {
+    const size =
+      custom?.heading1Size === 'small'
+        ? 'text-sm sm:text-base'
+        : custom?.heading1Size === 'large'
+        ? 'text-lg sm:text-xl'
+        : custom?.heading1Size === 'xlarge'
+        ? 'text-xl sm:text-2xl'
+        : 'text-base sm:text-lg';
+    const weight = custom?.heading1Bold !== false ? 'font-black' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  const getHeading2Class = () => {
+    const size =
+      custom?.heading2Size === 'small'
+        ? 'text-[11px]'
+        : custom?.heading2Size === 'large'
+        ? 'text-sm'
+        : 'text-xs';
+    const weight = custom?.heading2Bold !== false ? 'font-black' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  const getHeading3Class = () => {
+    const size =
+      custom?.heading3Size === 'small'
+        ? 'text-[11px]'
+        : custom?.heading3Size === 'large'
+        ? 'text-[13px]'
+        : 'text-xs';
+    const weight = custom?.heading3Bold !== false ? 'font-bold' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  const fontStyle = {
+    fontFamily:
+      custom?.fontFamily === 'courier'
+        ? 'Courier New, monospace'
+        : custom?.fontFamily === 'sans'
+        ? 'Inter, system-ui, sans-serif'
+        : 'JetBrains Mono, monospace',
+  };
 
   return createPortal(
     <div
@@ -94,42 +230,52 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
         {/* Dynamic Thermal Paper Slip */}
         <div
           id="printable-receipt"
+          style={fontStyle}
           className={`w-full ${paperWidthClass} bg-white rounded-3xl shadow-2xl p-6 sm:p-7 font-mono text-xs leading-relaxed text-zinc-900 tracking-[0.04em] sm:tracking-[0.06em] selection:bg-zinc-200 border border-white/30 select-text shrink-0`}
         >
           {/* Logo Header */}
           {showLogo && logoUrl && (
-            <div className={`pb-3 flex ${logoAlignment === 'left' ? 'justify-start' : 'justify-center'}`}>
+            <div
+              style={{
+                position: 'relative',
+                top: `${-(custom?.logoOffsetYPx ?? 0)}px`,
+                paddingBottom: '10px',
+              }}
+              className={`flex transition-transform duration-150 ${logoAlignment === 'left' ? 'justify-start' : 'justify-center'}`}
+            >
               <img
                 src={logoUrl}
                 alt="Logo"
                 style={{ width: `${logoWidthPx}px` }}
-                className="object-contain max-h-24"
+                className="object-contain max-h-48 h-auto"
               />
             </div>
           )}
 
           {/* Receipt Brand Header */}
           <div className={`pb-3 ${dividerClass} ${headerAlignment === 'left' ? 'text-left' : 'text-center'}`}>
-            <h2 className="font-black text-base sm:text-lg tracking-wider text-zinc-950">
-              {(custom?.businessName || settings.businessName).toUpperCase()}
-            </h2>
-            {(custom?.tagline || settings.tagline) && (
+            {displayBusinessName && displayBusinessName.trim() !== '' && (
+              <h2 className={`tracking-wider text-zinc-950 ${getHeading1Class()}`}>
+                {displayBusinessName.toUpperCase()}
+              </h2>
+            )}
+            {displayTagline && displayTagline.trim() !== '' && (
               <p className="text-[10px] text-zinc-600 uppercase font-semibold mt-0.5">
-                {custom?.tagline || settings.tagline}
+                {displayTagline}
               </p>
             )}
-            {(custom?.address || settings.address) && (
-              <p className="text-[10px] text-zinc-500 mt-1">{custom?.address || settings.address}</p>
+            {displayAddress && displayAddress.trim() !== '' && (
+              <p className="text-[10px] text-zinc-500 mt-1">{displayAddress}</p>
             )}
-            {(custom?.phone || settings.phone) && (
-              <p className="text-[10px] text-zinc-500">Tel: {custom?.phone || settings.phone}</p>
+            {displayPhone && displayPhone.trim() !== '' && (
+              <p className="text-[10px] text-zinc-500">Tel: {displayPhone}</p>
             )}
           </div>
 
           {/* Order Meta Info */}
           <div className={`py-2.5 ${dividerClass} text-[11px] space-y-0.5`}>
             <div className="flex justify-between items-center">
-              <span className="font-black text-zinc-950">
+              <span className={`text-zinc-950 ${getHeading2Class()}`}>
                 {custom?.orderNumberPrefix || 'Order: #'} {order.orderNumber.replace('#', '')}
               </span>
               {(custom?.showOrderType ?? true) && (
@@ -141,7 +287,7 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
             {(custom?.showTableNumber ?? true) && order.tableNumber && (
               <div className="flex justify-between text-zinc-700">
                 <span>Table Number:</span>
-                <span className="font-black">Table {order.tableNumber}</span>
+                <span className={`text-zinc-950 ${getHeading3Class()}`}>Table {order.tableNumber}</span>
               </div>
             )}
             {(custom?.showDateTime ?? true) && (
@@ -154,17 +300,17 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
 
           {/* Purchased Line Items */}
           <div className={`py-2.5 ${dividerClass} space-y-2 text-xs`}>
-            <div className="flex justify-between font-black text-[10px] text-zinc-500 uppercase tracking-wider pb-1 border-b border-zinc-200">
+            <div className={`flex justify-between uppercase tracking-wider pb-1 border-b border-zinc-200 text-zinc-500 ${getHeading2Class()}`}>
               <span>ITEM</span>
               <span>TOTAL (Rs)</span>
             </div>
             {order.items.map((item, idx) => (
               <div key={idx} className="space-y-0.5">
-                <div className="flex justify-between items-start gap-2 font-bold text-zinc-950">
+                <div className={`flex justify-between items-start gap-2 text-zinc-950 ${getHeading3Class()}`}>
                   <span className="flex-1">
                     {item.quantity}x {item.name}
                   </span>
-                  <span className="tabular-nums whitespace-nowrap text-right shrink-0">
+                  <span className={`tabular-nums whitespace-nowrap text-right shrink-0 ${custom?.bodyBold ? 'font-bold' : 'font-semibold'}`}>
                     {(item.itemTotalCents / 100).toLocaleString('en-US', {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
@@ -314,20 +460,20 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
           )}
 
           {/* Built-in Developer Credits on Bottom of Receipt */}
-          <div className="mt-3 pt-2.5 border-t border-dashed border-zinc-200 text-center select-text">
-            <div className="text-[9px] font-sans tracking-wide text-zinc-400 uppercase">
-              Developed by <span className="font-bold text-zinc-700 tracking-wider">OGO TECHNOLOGY</span>
+          <div className="mt-3.5 pt-2.5 border-t border-dashed border-zinc-900 text-center select-text thermal-dev-footer">
+            <div className="text-[11px] font-mono font-black text-black uppercase tracking-wider">
+              DEVELOPED BY OGO TECHNOLOGY
             </div>
-            <div className="text-[8.5px] text-zinc-400 mt-0.5 tracking-tight font-mono flex items-center justify-center gap-1.5 opacity-85">
+            <div className="text-[10px] font-mono font-bold text-black mt-0.5 tracking-tight flex items-center justify-center gap-1.5">
               <span>www.ogotechnology.net</span>
-              <span className="opacity-40">•</span>
+              <span>•</span>
               <span>+94 75 930 7059</span>
             </div>
           </div>
         </div>
 
         {/* Floating Action Buttons Below Slip */}
-        <div className="flex items-center justify-center gap-2.5 sm:gap-3 mt-4 flex-wrap z-10 shrink-0">
+        <div className="flex items-center justify-center gap-3 mt-4 z-10 shrink-0">
           <button
             type="button"
             onClick={onClose}
@@ -338,11 +484,12 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
 
           <button
             type="button"
-            onClick={handlePrint}
-            className="flex items-center gap-2 px-6 py-2.5 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white text-xs sm:text-sm font-black shadow-teal transition-all active:scale-95 border border-brand-teal-light/20 cursor-pointer"
+            disabled={isPrinting}
+            onClick={() => handlePrint()}
+            className="flex items-center gap-2 px-7 py-2.5 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white text-xs sm:text-sm font-black shadow-teal transition-all active:scale-95 border border-brand-teal-light/20 cursor-pointer disabled:opacity-50"
           >
             <Printer className="w-4 h-4" />
-            <span>Print Receipt (80mm)</span>
+            <span>{isPrinting ? 'Printing...' : 'Print Receipt'}</span>
           </button>
         </div>
       </div>

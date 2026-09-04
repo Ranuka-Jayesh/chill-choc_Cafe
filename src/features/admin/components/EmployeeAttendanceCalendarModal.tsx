@@ -45,7 +45,7 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
   // Starting day on Monday (0 = Mon, 6 = Sun)
   const startingDayOffset = (firstDayOfWeek + 6) % 7;
 
-  // Month summary statistics
+  // Month summary statistics - strictly from actual database records
   const stats = useMemo(() => {
     let presentCount = 0;
     let lateCount = 0;
@@ -67,7 +67,7 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
       } else {
         const dow = new Date(currentYear, currentMonth - 1, day).getDay();
         if (dow === 0) holidayCount++;
-        else presentCount++;
+        // Unrecorded days are NOT counted as present!
       }
     }
 
@@ -104,19 +104,25 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
 
   // Toggle day status on double-click / cycle
   const handleCycleDayStatus = (dateKey: string) => {
-    const current = attendanceMap[dateKey]?.status || 'PRESENT';
-    let nextStatus: AttendanceDayStatus = 'PRESENT';
-    if (current === 'PRESENT') nextStatus = 'LATE';
+    const current = attendanceMap[dateKey]?.status;
+    let nextStatus: AttendanceDayStatus | 'CLEAR' = 'PRESENT';
+    if (!current) nextStatus = 'PRESENT';
+    else if (current === 'PRESENT') nextStatus = 'LATE';
     else if (current === 'LATE') nextStatus = 'EARLY_LEAVE';
     else if (current === 'EARLY_LEAVE') nextStatus = 'OVERTIME';
     else if (current === 'OVERTIME') nextStatus = 'ABSENT';
     else if (current === 'ABSENT') nextStatus = 'HOLIDAY';
-    else if (current === 'HOLIDAY') nextStatus = 'PRESENT';
+    else if (current === 'HOLIDAY') nextStatus = 'CLEAR';
 
-    accountingService.updateEmployeeAttendanceDay(employee.id, dateKey, {
-      status: nextStatus,
-      overtimeHours: nextStatus === 'OVERTIME' ? 2 : undefined,
-    });
+    if (nextStatus === 'CLEAR') {
+      accountingService.deleteEmployeeAttendanceDay(employee.id, dateKey);
+    } else {
+      accountingService.updateEmployeeAttendanceDay(employee.id, dateKey, {
+        status: nextStatus,
+        overtimeHours: nextStatus === 'OVERTIME' ? 2 : undefined,
+        workedHours: nextStatus === 'ABSENT' || nextStatus === 'HOLIDAY' ? 0 : 8,
+      });
+    }
     if (onUpdate) onUpdate();
   };
 
@@ -301,19 +307,20 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
               <div className="grid grid-cols-7 gap-1">
                 {/* Empty offset days */}
                 {Array.from({ length: startingDayOffset }).map((_, i) => (
-                  <div key={`empty-${i}`} className="w-7 sm:w-8 h-7 sm:h-8 mx-auto" />
+                  <div key={`empty-${i}`} className="w-8 h-8 sm:w-9 sm:h-9 mx-auto aspect-square" />
                 ))}
 
                 {/* Month days */}
                 {Array.from({ length: daysInMonth }).map((_, i) => {
                   const dayNum = i + 1;
                   const dateKey = `${currentYear}-${String(currentMonth).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
-                  const record = attendanceMap[dateKey] || { status: 'PRESENT' };
-                  const isPresent = record.status === 'PRESENT';
-                  const isLate = record.status === 'LATE';
-                  const isEarlyLeave = record.status === 'EARLY_LEAVE';
-                  const isOvertime = record.status === 'OVERTIME';
-                  const isAbsent = record.status === 'ABSENT';
+                  const record = attendanceMap[dateKey];
+                  const isPresent = record?.status === 'PRESENT';
+                  const isLate = record?.status === 'LATE';
+                  const isEarlyLeave = record?.status === 'EARLY_LEAVE';
+                  const isOvertime = record?.status === 'OVERTIME';
+                  const isAbsent = record?.status === 'ABSENT';
+                  const isHoliday = record?.status === 'HOLIDAY';
                   const isSelected = selectedDayKey === dateKey;
 
                   return (
@@ -321,42 +328,33 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
                       key={dateKey}
                       onClick={() => setSelectedDayKey(dateKey)}
                       onDoubleClick={() => handleCycleDayStatus(dateKey)}
-                      className={`flex items-center justify-center cursor-pointer transition-transform ${
-                        isSelected ? 'scale-110 ring-2 ring-brand-teal rounded-full' : 'hover:scale-105'
-                      }`}
-                      title={`${dateKey}: ${record.status} (Click to inspect details, double-click to toggle)`}
+                      className="flex items-center justify-center p-0.5"
                     >
-                      {isPresent ? (
-                        // GREEN CIRCLE (On Time)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 rounded-full border-2 border-emerald-600 bg-emerald-50 text-emerald-700 font-extrabold text-[11px] sm:text-xs flex items-center justify-center shadow-2xs">
-                          {dayNum}
-                        </div>
-                      ) : isLate ? (
-                        // ORANGE CIRCLE (Late)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 rounded-full border-2 border-amber-600 bg-amber-50 text-amber-700 font-extrabold text-[11px] sm:text-xs flex items-center justify-center shadow-2xs">
-                          {dayNum}
-                        </div>
-                      ) : isEarlyLeave ? (
-                        // YELLOW CIRCLE (Early Leave)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 rounded-full border-2 border-yellow-500 bg-yellow-50 text-yellow-900 font-extrabold text-[11px] sm:text-xs flex items-center justify-center shadow-2xs">
-                          {dayNum}
-                        </div>
-                      ) : isOvertime ? (
-                        // PURPLE CIRCLE (Overtime)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 rounded-full border-2 border-purple-600 bg-purple-50 text-purple-700 font-extrabold text-[11px] sm:text-xs flex items-center justify-center shadow-2xs">
-                          {dayNum}
-                        </div>
-                      ) : isAbsent ? (
-                        // RED CIRCLE (Absent)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 rounded-full border-2 border-rose-600 bg-rose-50 text-rose-700 font-extrabold text-[11px] sm:text-xs flex items-center justify-center shadow-2xs">
-                          {dayNum}
-                        </div>
-                      ) : (
-                        // NO COLOR (Holiday / Off)
-                        <div className="w-7 sm:w-8 h-7 sm:h-8 text-text-muted/60 font-semibold text-[11px] sm:text-xs flex items-center justify-center hover:bg-cream-100 rounded-full transition-colors">
-                          {dayNum}
-                        </div>
-                      )}
+                      <button
+                        type="button"
+                        className={`w-8 h-8 sm:w-9 sm:h-9 rounded-full aspect-square flex items-center justify-center cursor-pointer transition-all ${
+                          isSelected
+                            ? 'ring-2 ring-brand-teal ring-offset-2 ring-offset-[#FAF7F2] shadow-sm scale-110 z-10'
+                            : 'hover:scale-105'
+                        } ${
+                          isPresent
+                            ? 'border-2 border-emerald-600 bg-emerald-50 text-emerald-700 font-extrabold text-[11px] sm:text-xs shadow-2xs'
+                            : isLate
+                            ? 'border-2 border-amber-600 bg-amber-50 text-amber-700 font-extrabold text-[11px] sm:text-xs shadow-2xs'
+                            : isEarlyLeave
+                            ? 'border-2 border-yellow-500 bg-yellow-50 text-yellow-900 font-extrabold text-[11px] sm:text-xs shadow-2xs'
+                            : isOvertime
+                            ? 'border-2 border-purple-600 bg-purple-50 text-purple-700 font-extrabold text-[11px] sm:text-xs shadow-2xs'
+                            : isAbsent
+                            ? 'border-2 border-rose-600 bg-rose-50 text-rose-700 font-extrabold text-[11px] sm:text-xs shadow-2xs'
+                            : isHoliday
+                            ? 'text-rose-400/80 font-bold text-[11px] sm:text-xs hover:bg-cream-100'
+                            : 'text-text-muted/80 font-semibold text-[11px] sm:text-xs hover:bg-cream-100'
+                        }`}
+                        title={`${dateKey}: ${record?.status || 'No record'} (Click to inspect, double-click to toggle)`}
+                      >
+                        {dayNum}
+                      </button>
                     </div>
                   );
                 })}
@@ -365,81 +363,141 @@ export const EmployeeAttendanceCalendarModal: React.FC<EmployeeAttendanceCalenda
 
             {/* Selected Date Inspector Card */}
             {selectedDayKey && (
-              <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#EAE3DA] space-y-2 text-xs animate-in fade-in">
-                <div className="flex items-center justify-between">
-                  <span className="font-extrabold text-brand-brown-dark font-mono">
-                    📅 {selectedDayKey}
+              <div className="p-3.5 bg-[#FAF7F2] rounded-2xl border border-[#EAE3DA] space-y-2.5 text-xs animate-in fade-in shadow-xs">
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#EAE3DA] pb-2">
+                  <span className="font-extrabold text-brand-brown-dark font-mono flex items-center gap-1.5 text-xs">
+                    <CalendarIcon className="w-3.5 h-3.5 text-brand-teal" />
+                    {new Date(selectedDayKey + 'T00:00:00').toLocaleDateString('en-US', {
+                      weekday: 'short',
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                    })}
                   </span>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
                       onClick={() => handleCycleDayStatus(selectedDayKey)}
-                      className="text-[10px] text-brand-teal hover:underline font-bold"
+                      className="px-2.5 py-0.5 rounded-lg bg-white border border-[#E0D7CC] hover:bg-cream-100 text-[10px] text-brand-teal font-extrabold transition-colors cursor-pointer shadow-2xs"
+                      title="Cycle: Present → Late → Early Leave → Overtime → Absent → Holiday → Clear"
                     >
                       Cycle Status
                     </button>
                     <button
                       type="button"
                       onClick={() => setSelectedDayKey(null)}
-                      className="text-text-muted hover:text-brand-brown-dark"
+                      className="p-1 rounded-lg text-text-muted hover:text-brand-brown-dark hover:bg-cream-200 transition-colors cursor-pointer"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div>
-                    <span className="text-text-muted font-bold block">Status:</span>
-                    <span className="font-extrabold text-brand-brown-dark">
-                      {selectedDayRecord?.status || 'PRESENT'}
+                {/* 4-Metric Grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                  <div className="bg-white p-2 rounded-xl border border-[#EAE3DA]">
+                    <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                      Status
+                    </span>
+                    {selectedDayRecord?.status === 'PRESENT' ? (
+                      <span className="font-extrabold text-emerald-700 text-xs">Present ✓</span>
+                    ) : selectedDayRecord?.status === 'LATE' ? (
+                      <span className="font-extrabold text-amber-700 text-xs">Late Arrival</span>
+                    ) : selectedDayRecord?.status === 'EARLY_LEAVE' ? (
+                      <span className="font-extrabold text-yellow-900 text-xs">Early Leave</span>
+                    ) : selectedDayRecord?.status === 'OVERTIME' ? (
+                      <span className="font-extrabold text-purple-700 text-xs">+ Overtime</span>
+                    ) : selectedDayRecord?.status === 'ABSENT' ? (
+                      <span className="font-extrabold text-rose-700 text-xs">Absent</span>
+                    ) : selectedDayRecord?.status === 'HOLIDAY' ? (
+                      <span className="font-extrabold text-text-muted text-xs">Weekly Off</span>
+                    ) : (
+                      <span className="font-bold text-text-muted text-xs">No Record</span>
+                    )}
+                  </div>
+
+                  <div className="bg-white p-2 rounded-xl border border-[#EAE3DA]">
+                    <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                      Worked Hours
+                    </span>
+                    <span className="font-black text-brand-brown-dark font-mono text-xs">
+                      {!selectedDayRecord ||
+                      selectedDayRecord.status === 'ABSENT' ||
+                      selectedDayRecord.status === 'HOLIDAY'
+                        ? '0.0 hrs'
+                        : selectedDayRecord.workedHours !== undefined
+                        ? `${selectedDayRecord.workedHours.toFixed(1)} hrs`
+                        : `${selectedDayRecord.standardShiftHours || 8}.0 hrs`}
                     </span>
                   </div>
-                  <div>
-                    <span className="text-text-muted font-bold block">Worked Hours:</span>
-                    <span className="font-extrabold text-brand-brown-dark font-mono">
-                      {selectedDayRecord?.workedHours !== undefined ? `${selectedDayRecord.workedHours}h` : '8.0h'}
+
+                  <div className="bg-white p-2 rounded-xl border border-[#EAE3DA]">
+                    <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                      Check In
                     </span>
-                  </div>
-                  <div>
-                    <span className="text-text-muted font-bold block">Check In:</span>
-                    <span className="font-mono text-brand-brown-dark">
+                    <span className="font-bold text-brand-brown-dark font-mono text-xs">
                       {selectedDayRecord?.checkInTime || '—'}
                     </span>
                   </div>
-                  <div>
-                    <span className="text-text-muted font-bold block">Check Out:</span>
-                    <span className="font-mono text-brand-brown-dark">
+
+                  <div className="bg-white p-2 rounded-xl border border-[#EAE3DA]">
+                    <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                      Check Out
+                    </span>
+                    <span className="font-bold text-brand-brown-dark font-mono text-xs">
                       {selectedDayRecord?.checkOutTime || '—'}
                     </span>
                   </div>
                 </div>
 
-                {/* Digital Signatures Thumbnail */}
-                {(selectedDayRecord?.checkInSignature || selectedDayRecord?.checkOutSignature) && (
-                  <div className="pt-1.5 border-t border-[#EAE3DA] flex items-center gap-2">
-                    {selectedDayRecord.checkInSignature && (
-                      <div className="flex-1 p-1 bg-white rounded-lg border border-[#EAE3DA] text-center">
-                        <span className="text-[9px] text-text-muted block">In Signature</span>
-                        <img
-                          src={selectedDayRecord.checkInSignature}
-                          alt="Sign In"
-                          className="h-7 mx-auto object-contain"
-                        />
-                      </div>
-                    )}
-                    {selectedDayRecord.checkOutSignature && (
-                      <div className="flex-1 p-1 bg-white rounded-lg border border-[#EAE3DA] text-center">
-                        <span className="text-[9px] text-text-muted block">Out Signature</span>
-                        <img
-                          src={selectedDayRecord.checkOutSignature}
-                          alt="Sign Out"
-                          className="h-7 mx-auto object-contain"
-                        />
-                      </div>
-                    )}
+                {/* Additional Info if present */}
+                {(selectedDayRecord?.notes || selectedDayRecord?.lateMinutes || selectedDayRecord?.overtimeHours) && (
+                  <div className="text-[10px] text-text-secondary bg-white p-1.5 px-2.5 rounded-lg border border-[#EAE3DA] flex items-center justify-between">
+                    <span className="font-medium">{selectedDayRecord.notes || 'Shift record'}</span>
+                    {selectedDayRecord.isLate && selectedDayRecord.lateMinutes ? (
+                      <span className="font-extrabold text-amber-700">Late: {selectedDayRecord.lateMinutes}m</span>
+                    ) : selectedDayRecord.overtimeHours ? (
+                      <span className="font-extrabold text-purple-700">OT: +{selectedDayRecord.overtimeHours}h</span>
+                    ) : null}
                   </div>
                 )}
+
+                {/* Digital Signatures Thumbnail */}
+                <div className="pt-1.5 border-t border-[#EAE3DA]">
+                  {selectedDayRecord?.checkInSignature || selectedDayRecord?.checkOutSignature ? (
+                    <div className="flex items-center gap-2">
+                      {selectedDayRecord.checkInSignature && (
+                        <div className="flex-1 p-1.5 bg-white rounded-xl border border-[#EAE3DA] text-center shadow-2xs">
+                          <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                            Check-In Signature ({selectedDayRecord.checkInTime || 'In'})
+                          </span>
+                          <img
+                            src={selectedDayRecord.checkInSignature}
+                            alt="Sign In"
+                            className="h-8 mx-auto object-contain"
+                          />
+                        </div>
+                      )}
+                      {selectedDayRecord.checkOutSignature && (
+                        <div className="flex-1 p-1.5 bg-white rounded-xl border border-[#EAE3DA] text-center shadow-2xs">
+                          <span className="text-[9px] font-extrabold uppercase text-text-muted block mb-0.5">
+                            Check-Out Signature ({selectedDayRecord.checkOutTime || 'Out'})
+                          </span>
+                          <img
+                            src={selectedDayRecord.checkOutSignature}
+                            alt="Sign Out"
+                            className="h-8 mx-auto object-contain"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-center py-1 text-[10px] text-text-muted italic">
+                      No handwritten digital signature recorded for this date.
+                    </div>
+                  )}
+                </div>
               </div>
             )}
 

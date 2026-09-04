@@ -7,109 +7,12 @@ import {
   AttendanceDayStatus,
   EmployeeAttendanceDay,
   EmployeeAttendanceDetailRow,
+  AttendanceRecord,
   SystemSettings,
 } from '@/types';
 import { catalogService } from './catalogService';
 import { orderService } from './orderService';
-
-const SEED_EMPLOYEES: Employee[] = [
-  {
-    id: 'emp_001',
-    name: 'Chaminda Silva',
-    role: 'General Manager & Admin',
-    phone: '+94 77 123 4567',
-    email: 'chaminda@chillandchoc.lk',
-    baseSalaryCents: 12000000, // Rs. 120,000.00
-    payFrequency: 'MONTHLY',
-    overtimeHourlyRateCents: 65000, // Rs. 650.00 / hr
-    leaveDailyRateCents: 460000, // Rs. 4,600.00 / day
-    attendedDays: 26,
-    bankName: 'Commercial Bank of Ceylon',
-    accountNumber: '8001293847',
-    active: true,
-    createdAt: '2026-01-01T00:00:00.000Z',
-    notes: 'Store manager and administrator.',
-  },
-  {
-    id: 'emp_002',
-    name: 'Nimal Perera',
-    role: 'Head Barista & Cashier',
-    phone: '+94 71 987 6543',
-    email: 'nimal@chillandchoc.lk',
-    baseSalaryCents: 7500000, // Rs. 75,000.00
-    payFrequency: 'MONTHLY',
-    overtimeHourlyRateCents: 55000, // Rs. 550.00 / hr (custom override)
-    leaveDailyRateCents: 288000, // Rs. 2,880.00 / day
-    attendedDays: 24,
-    bankName: 'Bank of Ceylon',
-    accountNumber: '0029384756',
-    active: true,
-    createdAt: '2026-02-01T00:00:00.000Z',
-    notes: 'Lead coffee barista and shift in-charge.',
-  },
-  {
-    id: 'emp_003',
-    name: 'Kasun Fernando',
-    role: 'Cashier & Junior Barista',
-    phone: '+94 76 555 8899',
-    email: 'kasun@chillandchoc.lk',
-    baseSalaryCents: 5500000, // Rs. 55,000.00
-    payFrequency: 'MONTHLY',
-    overtimeHourlyRateCents: 45000, // Rs. 450.00 / hr (default standard)
-    leaveDailyRateCents: 211500, // Rs. 2,115.00 / day
-    attendedDays: 22,
-    bankName: 'Sampath Bank',
-    accountNumber: '1004839201',
-    active: true,
-    createdAt: '2026-03-01T00:00:00.000Z',
-    notes: 'Morning shift cashier.',
-  },
-  {
-    id: 'emp_004',
-    name: 'Dilshan Madushanka',
-    role: 'Kitchen & Stock Assistant',
-    phone: '+94 72 333 4455',
-    baseSalaryCents: 4500000, // Rs. 45,000.00
-    payFrequency: 'MONTHLY',
-    overtimeHourlyRateCents: 40000, // Rs. 400.00 / hr
-    leaveDailyRateCents: 173000, // Rs. 1,730.00 / day
-    attendedDays: 25,
-    bankName: 'Hatton National Bank (HNB)',
-    accountNumber: '0492837461',
-    active: true,
-    createdAt: '2026-04-01T00:00:00.000Z',
-    notes: 'Ingredient prep and stock receiving.',
-  },
-];
-
-const SEED_EMPLOYEE_PAYMENTS: EmployeePayment[] = [
-  {
-    id: 'pay_001',
-    employeeId: 'emp_002',
-    employeeName: 'Nimal Perera',
-    amountCents: 1500000, // Rs. 15,000.00 Advance
-    paymentType: 'ADVANCE',
-    method: 'CASH',
-    date: '2026-08-15T10:30:00.000Z',
-    notes: 'Mid-month salary advance approved by GM',
-    referenceNumber: 'ADV-8812',
-    createdAt: '2026-08-15T10:30:00.000Z',
-  },
-  {
-    id: 'pay_002',
-    employeeId: 'emp_003',
-    employeeName: 'Kasun Fernando',
-    amountCents: 5500000, // Rs. 55,000.00 Salary
-    paymentType: 'SALARY',
-    method: 'CARD',
-    date: '2026-08-01T09:00:00.000Z',
-    bankName: 'Sampath Bank',
-    notes: 'July Salary Bank Transfer',
-    referenceNumber: 'SAL-7701',
-    createdAt: '2026-08-01T09:00:00.000Z',
-  },
-];
-
+import { realtimeSocketService } from './realtimeSocketService';
 export const accountingService = {
   getSystemSettings: (): SystemSettings | undefined => {
     return db.getSnapshot().settings;
@@ -119,12 +22,7 @@ export const accountingService = {
   // Employees
   // ---------------------------------------------------------------------------
   getEmployees: (): Employee[] => {
-    const list = db.getSnapshot().employees;
-    if (!list || list.length === 0) {
-      db.update('employees', () => SEED_EMPLOYEES);
-      return SEED_EMPLOYEES;
-    }
-    return list;
+    return db.getSnapshot().employees || [];
   },
 
   getEmployeeById: (id: string): Employee | undefined => {
@@ -219,9 +117,37 @@ export const accountingService = {
   ): Record<string, EmployeeAttendanceDay> => {
     const emps = db.getSnapshot().employees || [];
     const emp = emps.find((e) => e.id === employeeId);
-    const existing = emp?.attendanceRecords || {};
-    const result: Record<string, EmployeeAttendanceDay> = {};
+    const existing: Record<string, EmployeeAttendanceDay> = {};
 
+    // 1. Populate legacy records if any
+    if (emp?.attendanceRecords) {
+      Object.assign(existing, emp.attendanceRecords);
+    }
+
+    // 2. Overlay dedicated attendance table records
+    const allAtt = db.getSnapshot().attendance || [];
+    allAtt
+      .filter((a) => a.employeeId === employeeId)
+      .forEach((a) => {
+        existing[a.date] = {
+          status: a.status,
+          standardShiftHours: a.standardShiftHours,
+          overtimeHours: a.overtimeHours,
+          checkInTime: a.checkInTime,
+          checkOutTime: a.checkOutTime,
+          checkInSignature: a.checkInSignature,
+          checkOutSignature: a.checkOutSignature,
+          workedHours: a.workedHours,
+          earlyLeaveHours: a.earlyLeaveHours,
+          isLate: a.isLate,
+          lateMinutes: a.lateMinutes,
+          isEarlyLeave: a.isEarlyLeave,
+          earlyMinutes: a.earlyMinutes,
+          notes: a.notes,
+        };
+      });
+
+    const result: Record<string, EmployeeAttendanceDay> = {};
     const daysInMonth = new Date(year, month, 0).getDate();
     for (let day = 1; day <= daysInMonth; day++) {
       const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
@@ -230,22 +156,10 @@ export const accountingService = {
       } else {
         const dayOfWeek = new Date(year, month - 1, day).getDay(); // 0 is Sunday
         if (dayOfWeek === 0) {
-          // Sunday is Holiday (no color circle)
+          // Sunday is Holiday
           result[dateKey] = { status: 'HOLIDAY' };
-        } else {
-          // Default weekday logic based on standard attendance
-          const targetAttended = emp?.attendedDays ?? 26;
-          // Working days so far in month up to target
-          if (day === 12 || day === 25) {
-            // Sample OT days
-            result[dateKey] = { status: 'OVERTIME', overtimeHours: 2 };
-          } else if (targetAttended < 25 && day === 18) {
-            // Absent day
-            result[dateKey] = { status: 'ABSENT' };
-          } else {
-            result[dateKey] = { status: 'PRESENT' };
-          }
         }
+        // Unclocked days do NOT have records in the database!
       }
     }
     return result;
@@ -294,7 +208,34 @@ export const accountingService = {
   ): EmployeeAttendanceDetailRow[] => {
     const emps = db.getSnapshot().employees || [];
     const emp = emps.find((e) => e.id === employeeId);
-    const existingRecords = emp?.attendanceRecords || {};
+
+    // Collect all real records from both dedicated attendance table & legacy records
+    const realRecords: Record<string, EmployeeAttendanceDay> = {};
+    if (emp?.attendanceRecords) {
+      Object.assign(realRecords, emp.attendanceRecords);
+    }
+    const allAtt = db.getSnapshot().attendance || [];
+    allAtt
+      .filter((a) => a.employeeId === employeeId)
+      .forEach((a) => {
+        realRecords[a.date] = {
+          status: a.status,
+          standardShiftHours: a.standardShiftHours,
+          overtimeHours: a.overtimeHours,
+          checkInTime: a.checkInTime,
+          checkOutTime: a.checkOutTime,
+          checkInSignature: a.checkInSignature,
+          checkOutSignature: a.checkOutSignature,
+          workedHours: a.workedHours,
+          earlyLeaveHours: a.earlyLeaveHours,
+          isLate: a.isLate,
+          lateMinutes: a.lateMinutes,
+          isEarlyLeave: a.isEarlyLeave,
+          earlyMinutes: a.earlyMinutes,
+          notes: a.notes,
+        };
+      });
+
     const attendanceMap = accountingService.getEmployeeAttendanceMap(employeeId, year, month);
 
     const daysInMonth = new Date(year, month, 0).getDate();
@@ -314,11 +255,6 @@ export const accountingService = {
       return `${String(h).padStart(2, '0')}:${m} ${ampm}`;
     };
 
-    const generateSvg = (label: string, seed: number) => {
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 70" fill="none" stroke="#2B1810" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M 15 42 Q 35 ${18 + (seed % 10)}, 55 38 T 90 ${32 + (seed % 8)} T 125 45 T 160 ${28 + (seed % 6)} T 185 36 M 25 52 Q 100 54, 175 50" /></svg>`;
-      return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-    };
-
     for (let day = 1; day <= daysInMonth; day++) {
       const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const dObj = new Date(year, month - 1, day);
@@ -326,12 +262,21 @@ export const accountingService = {
       const dow = dayShortNames[dowIndex];
       const formattedDate = `${String(day).padStart(2, '0')} ${monthNames[month - 1]} ${year} (${dow})`;
 
-      const isRealRecord = Boolean(existingRecords[dateKey]);
-      const rec = attendanceMap[dateKey] || { status: 'PRESENT' };
-      const status = rec.status;
+      const now = new Date();
+      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+      const realRecord = realRecords[dateKey];
+      const rec = attendanceMap[dateKey];
+      const status: AttendanceDayStatus =
+        rec?.status ||
+        (dowIndex === 0
+          ? 'HOLIDAY'
+          : dateKey >= todayStr
+          ? 'SCHEDULED'
+          : 'ABSENT');
 
       const standardShift =
-        rec.standardShiftHours ??
+        rec?.standardShiftHours ??
         accountingService.getStandardShiftHoursForDate(employeeId, dateKey);
 
       let checkInTime = '-';
@@ -342,57 +287,32 @@ export const accountingService = {
       let inSign: string | undefined = undefined;
       let outSign: string | undefined = undefined;
 
-      if (isRealRecord) {
-        // ACTUAL REAL-TIME RECORD FROM POS
-        checkInTime = rec.checkInTime ? formatTime12h(rec.checkInTime) : '-';
-        checkOutTime = rec.checkOutTime ? formatTime12h(rec.checkOutTime) : '-';
-        workedHours = rec.workedHours ?? (rec.checkOutTime ? standardShift : 0);
-        overtimeHours = rec.overtimeHours ?? 0;
-        earlyLeaveHours = rec.earlyLeaveHours ?? 0;
-        inSign = rec.checkInSignature;
-        outSign = rec.checkOutSignature;
+      if (realRecord) {
+        // ACTUAL REAL RECORD FROM POS CLOCK-IN
+        checkInTime = realRecord.checkInTime ? formatTime12h(realRecord.checkInTime) : '-';
+        checkOutTime = realRecord.checkOutTime ? formatTime12h(realRecord.checkOutTime) : '-';
+        workedHours = realRecord.workedHours ?? (realRecord.checkOutTime ? standardShift : 0);
+        overtimeHours = realRecord.overtimeHours ?? 0;
+        earlyLeaveHours = realRecord.earlyLeaveHours ?? 0;
+        inSign = realRecord.checkInSignature;
+        outSign = realRecord.checkOutSignature;
       } else {
-        // MOCK / DEFAULT PAST DAYS
-        if (status === 'PRESENT') {
-          checkInTime = '08:00 AM';
-          const finish = 8 + standardShift;
-          const hour12 = finish > 12 ? finish - 12 : finish === 0 ? 12 : finish;
-          const period = finish >= 12 && finish < 24 ? 'PM' : 'AM';
-          checkOutTime = `${String(hour12).padStart(2, '0')}:00 ${period}`;
-          workedHours = standardShift;
-          inSign = generateSvg(emp?.name || 'Staff', day * 3);
-          outSign = generateSvg(emp?.name || 'Staff', day * 7);
-        } else if (status === 'LATE') {
-          checkInTime = '09:00 AM';
-          const finish = 9 + standardShift;
-          const hour12 = finish > 12 ? finish - 12 : finish === 0 ? 12 : finish;
-          const period = finish >= 12 && finish < 24 ? 'PM' : 'AM';
-          checkOutTime = `${String(hour12).padStart(2, '0')}:00 ${period}`;
-          workedHours = standardShift;
-          inSign = generateSvg(emp?.name || 'Staff', day * 3);
-          outSign = generateSvg(emp?.name || 'Staff', day * 7);
-        } else if (status === 'EARLY_LEAVE') {
-          checkInTime = '08:00 AM';
-          checkOutTime = '03:30 PM';
-          workedHours = Math.max(1, standardShift - 2);
-          earlyLeaveHours = 2;
-          inSign = generateSvg(emp?.name || 'Staff', day * 3);
-          outSign = generateSvg(emp?.name || 'Staff', day * 7);
-        } else if (status === 'OVERTIME') {
-          const ot = rec.overtimeHours || 2;
-          overtimeHours = ot;
-          workedHours = standardShift + ot;
-          checkInTime = '08:00 AM';
-          const finish = 8 + standardShift + ot;
-          const hour12 = finish > 12 ? finish - 12 : finish === 0 ? 12 : finish;
-          const period = finish >= 12 && finish < 24 ? 'PM' : 'AM';
-          checkOutTime = `${String(hour12).padStart(2, '0')}:00 ${period}`;
-          inSign = generateSvg(emp?.name || 'Staff', day * 3);
-          outSign = generateSvg(emp?.name || 'Staff', day * 7);
-        }
+        // NO DUMMY VALUES: Unclocked days have no times and no signatures
+        checkInTime = '-';
+        checkOutTime = '-';
+        workedHours = 0;
+        overtimeHours = 0;
+        earlyLeaveHours = 0;
+        inSign = undefined;
+        outSign = undefined;
       }
 
-      const varianceHours = workedHours - (status === 'HOLIDAY' ? 0 : standardShift);
+      const varianceHours =
+        status === 'ABSENT'
+          ? -standardShift
+          : status === 'HOLIDAY' || status === 'SCHEDULED'
+          ? 0
+          : workedHours - standardShift;
 
       rows.push({
         date: dateKey,
@@ -403,16 +323,16 @@ export const accountingService = {
         checkOutTime,
         checkInSignature: inSign,
         checkOutSignature: outSign,
-        standardShiftHours: status === 'HOLIDAY' ? 0 : standardShift,
+        standardShiftHours: standardShift,
         workedHours,
         overtimeHours,
         earlyLeaveHours,
         varianceHours,
-        isLate: rec.isLate,
-        lateMinutes: rec.lateMinutes,
-        isEarlyLeave: rec.isEarlyLeave,
-        earlyMinutes: rec.earlyMinutes,
-        notes: rec.notes,
+        isLate: realRecord?.isLate,
+        lateMinutes: realRecord?.lateMinutes,
+        isEarlyLeave: realRecord?.isEarlyLeave,
+        earlyMinutes: realRecord?.earlyMinutes,
+        notes: realRecord?.notes,
       });
     }
 
@@ -424,15 +344,52 @@ export const accountingService = {
     dateStr: string,
     record: EmployeeAttendanceDay
   ): Employee | null => {
+    const emps = db.getSnapshot().employees || [];
+    const emp = emps.find((e) => e.id === employeeId);
+    const stdHours =
+      record.standardShiftHours ??
+      accountingService.getStandardShiftHoursForDate(employeeId, dateStr);
+
+    const attId = `att_${employeeId}_${dateStr}`;
+    const dedicatedRecord: AttendanceRecord = {
+      id: attId,
+      employeeId,
+      employeeName: emp?.name,
+      date: dateStr,
+      status: record.status,
+      standardShiftHours: stdHours,
+      overtimeHours: record.overtimeHours,
+      checkInTime: record.checkInTime,
+      checkOutTime: record.checkOutTime,
+      checkInSignature: record.checkInSignature,
+      checkOutSignature: record.checkOutSignature,
+      workedHours: record.workedHours,
+      earlyLeaveHours: record.earlyLeaveHours,
+      isLate: record.isLate,
+      lateMinutes: record.lateMinutes,
+      isEarlyLeave: record.isEarlyLeave,
+      earlyMinutes: record.earlyMinutes,
+      notes: record.notes,
+      updatedAt: new Date().toISOString(),
+    };
+
+    // 1. Persist directly to dedicated 'attendance' table
+    db.update('attendance', (list) => {
+      const filtered = (list || []).filter(
+        (a) => a.id !== attId && !(a.employeeId === employeeId && a.date === dateStr)
+      );
+      return [dedicatedRecord, ...filtered];
+    });
+
+    // 2. Emit real-time attendance change to all connected clients
+    realtimeSocketService.emitAttendanceChanged(dedicatedRecord);
+
+    // 3. Keep employee attendedDays counter and cache updated
     let updatedEmp: Employee | null = null;
-    db.update('employees', (emps) =>
-      emps.map((e) => {
+    db.update('employees', (empList) =>
+      empList.map((e) => {
         if (e.id !== employeeId) return e;
         const currentRecords = { ...(e.attendanceRecords || {}) };
-        const stdHours =
-          record.standardShiftHours ??
-          accountingService.getStandardShiftHoursForDate(employeeId, dateStr);
-
         currentRecords[dateStr] = {
           ...record,
           standardShiftHours: stdHours,
@@ -447,15 +404,14 @@ export const accountingService = {
         for (let d = 1; d <= daysInMonth; d++) {
           const dKey = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
           const rec = currentRecords[dKey];
-          if (rec) {
-            if (rec.status === 'PRESENT' || rec.status === 'OVERTIME') {
-              attendedCount++;
-            }
-          } else {
-            const dow = new Date(y, m - 1, d).getDay();
-            if (dow !== 0) {
-              attendedCount++; // Default weekday present
-            }
+          if (
+            rec &&
+            (rec.status === 'PRESENT' ||
+              rec.status === 'LATE' ||
+              rec.status === 'EARLY_LEAVE' ||
+              rec.status === 'OVERTIME')
+          ) {
+            attendedCount++;
           }
         }
 
@@ -468,6 +424,54 @@ export const accountingService = {
       })
     );
     return updatedEmp;
+  },
+
+  deleteEmployeeAttendanceDay: (employeeId: string, dateStr: string): void => {
+    const attId = `att_${employeeId}_${dateStr}`;
+    db.update('attendance', (list) =>
+      (list || []).filter((a) => a.id !== attId && !(a.employeeId === employeeId && a.date === dateStr))
+    );
+    db.update('employees', (empList) =>
+      empList.map((e) => {
+        if (e.id !== employeeId) return e;
+        const currentRecords = { ...(e.attendanceRecords || {}) };
+        delete currentRecords[dateStr];
+
+        const [yStr, mStr] = dateStr.split('-');
+        const y = parseInt(yStr, 10);
+        const m = parseInt(mStr, 10);
+        const daysInMonth = new Date(y, m, 0).getDate();
+
+        let attendedCount = 0;
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dKey = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const rec = currentRecords[dKey];
+          if (
+            rec &&
+            (rec.status === 'PRESENT' ||
+              rec.status === 'LATE' ||
+              rec.status === 'EARLY_LEAVE' ||
+              rec.status === 'OVERTIME')
+          ) {
+            attendedCount++;
+          }
+        }
+
+        return {
+          ...e,
+          attendanceRecords: currentRecords,
+          attendedDays: attendedCount,
+        };
+      })
+    );
+    realtimeSocketService.emitAttendanceChanged({
+      id: attId,
+      employeeId,
+      employeeName: '',
+      date: dateStr,
+      status: 'SCHEDULED',
+      createdAt: new Date().toISOString(),
+    });
   },
 
   bulkSetMonthAttendance: (
@@ -478,35 +482,62 @@ export const accountingService = {
   ): Employee | null => {
     let updatedEmp: Employee | null = null;
     const daysInMonth = new Date(year, month, 0).getDate();
+    const newAttendanceBatch: AttendanceRecord[] = [];
 
     db.update('employees', (emps) =>
       emps.map((e) => {
         if (e.id !== employeeId) return e;
         const currentRecords = { ...(e.attendanceRecords || {}) };
-        let attendedCount = 0;
+        const std = e.standardHoursPerDay || 8;
 
         for (let d = 1; d <= daysInMonth; d++) {
           const dKey = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
           const dow = new Date(year, month - 1, d).getDay();
-          if (dow === 0) {
-            currentRecords[dKey] = { status: 'HOLIDAY' };
-          } else {
-            currentRecords[dKey] = { status: defaultStatus };
-            if (defaultStatus === 'PRESENT' || defaultStatus === 'OVERTIME') {
-              attendedCount++;
-            }
+          if (dow !== 0) {
+            currentRecords[dKey] = {
+              status: defaultStatus,
+              standardShiftHours: std,
+            };
+            newAttendanceBatch.push({
+              id: `att_${employeeId}_${dKey}`,
+              employeeId,
+              employeeName: e.name,
+              date: dKey,
+              status: defaultStatus,
+              standardShiftHours: std,
+              updatedAt: new Date().toISOString(),
+            });
           }
         }
 
         updatedEmp = {
           ...e,
           attendanceRecords: currentRecords,
-          attendedDays: attendedCount,
+          attendedDays: defaultStatus === 'PRESENT' ? daysInMonth - 4 : 0,
         };
         return updatedEmp;
       })
     );
+
+    // Also update dedicated attendance table
+    if (newAttendanceBatch.length > 0) {
+      db.update('attendance', (list) => {
+        const datePrefix = `${year}-${String(month).padStart(2, '0')}`;
+        const remaining = (list || []).filter(
+          (a) => !(a.employeeId === employeeId && a.date.startsWith(datePrefix))
+        );
+        return [...newAttendanceBatch, ...remaining];
+      });
+      realtimeSocketService.emitAttendanceChanged({ employeeId, month, year });
+    }
+
     return updatedEmp;
+  },
+
+  getAttendanceRecords: (employeeId?: string): AttendanceRecord[] => {
+    const list = db.getSnapshot().attendance || [];
+    if (!employeeId) return list;
+    return list.filter((a) => a.employeeId === employeeId);
   },
 
   // ---------------------------------------------------------------------------
@@ -514,10 +545,6 @@ export const accountingService = {
   // ---------------------------------------------------------------------------
   getEmployeePayments: (employeeId?: string): EmployeePayment[] => {
     const list = db.getSnapshot().employeePayments || [];
-    if (list.length === 0) {
-      db.update('employeePayments', () => SEED_EMPLOYEE_PAYMENTS);
-      return SEED_EMPLOYEE_PAYMENTS;
-    }
     if (employeeId) {
       return list.filter((p: EmployeePayment) => p.employeeId === employeeId);
     }
@@ -586,9 +613,10 @@ export const accountingService = {
     supplierName: string,
     amountCents: number,
     method: PurchasePaymentMethod,
-    details?: { chequeNumber?: string; bankName?: string; chequeDate?: string; notes?: string }
+    details?: { chequeNumber?: string; bankName?: string; chequeDate?: string; paymentDate?: string; notes?: string }
   ) => {
     let remainingToAllocate = amountCents;
+    const paymentTimestamp = details?.paymentDate ? new Date(details.paymentDate).toISOString() : new Date().toISOString();
 
     db.update('purchases', (list) =>
       list.map((po) => {
@@ -603,9 +631,10 @@ export const accountingService = {
           const newPayments = [
             ...(po.payments || []),
             {
+              id: `pm_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
               method,
               amountCents: alloc,
-              timestamp: new Date().toISOString(),
+              timestamp: paymentTimestamp,
               chequeNumber: details?.chequeNumber,
               bankName: details?.bankName,
               chequeDate: details?.chequeDate,
@@ -630,6 +659,7 @@ export const accountingService = {
       })
     );
 
+    realtimeSocketService.emitStockChanged(undefined, { action: 'SUPPLIER_BALANCE_SETTLED', supplierName });
     return true;
   },
 
@@ -652,15 +682,43 @@ export const accountingService = {
     const grossRevenueCents = monthlyOrders.reduce((sum, o) => sum + (o.totalCents || 0), 0);
     const orderCount = monthlyOrders.length;
 
-    // 2. Cost of Goods (Ingredient Purchases)
+    // 2. Cost of Goods & Purchases Payments (Accrual COGS + Cash Outflow by Payment Date)
     const allPurchases = catalogService.getPurchases();
-    const monthlyPurchases = allPurchases.filter((p) => isMatchingDate(p.purchaseDate));
-    const cogsPurchasesCents = monthlyPurchases.reduce((sum, p) => sum + (p.totalCents || 0), 0);
-    const purchasesPaidCents = monthlyPurchases.reduce((sum, p) => sum + (p.paidCents ?? p.totalCents), 0);
-    const purchasesDueCents = monthlyPurchases.reduce(
-      (sum, p) => sum + (p.dueCents ?? Math.max(0, p.totalCents - (p.paidCents ?? p.totalCents))),
-      0
-    );
+    const monthlyInvoicedPurchases = allPurchases.filter((p) => isMatchingDate(p.purchaseDate));
+    const cogsPurchasesCents = monthlyInvoicedPurchases.reduce((sum, p) => sum + (p.totalCents || 0), 0);
+
+    // Payments ACTUALLY made & cleared towards purchases during THIS specific month (regardless of when PO was created)
+    let purchasesPaidCents = 0;
+    let cashOutPurchasesCents = 0;
+
+    allPurchases.forEach((p) => {
+      (p.payments || []).forEach((pm) => {
+        // Cheques only count towards bank cash outflow once CLEARED by supplier/bank
+        const isCleared = pm.method !== 'CHEQUE' || pm.chequeStatus === 'CLEARED';
+        if (isCleared) {
+          const dateToCheck = pm.clearedAt || pm.timestamp;
+          if (isMatchingDate(dateToCheck)) {
+            purchasesPaidCents += pm.amountCents;
+            if (pm.method === 'CASH') {
+              cashOutPurchasesCents += pm.amountCents;
+            }
+          }
+        }
+      });
+    });
+
+    // Outstanding dues on all purchases created on or before this month that remain unpaid
+    const purchasesDueCents = allPurchases
+      .filter((p) => {
+        const pDate = new Date(p.purchaseDate);
+        const pYear = pDate.getFullYear();
+        const pMonth = pDate.getMonth() + 1;
+        return pYear < year || (pYear === year && pMonth <= month);
+      })
+      .reduce(
+        (sum, p) => sum + (p.dueCents ?? Math.max(0, p.totalCents - (p.paidCents ?? p.totalCents))),
+        0
+      );
 
     // 3. Employee Payroll & Disbursements
     const allPayroll = accountingService.getEmployeePayments();
@@ -673,7 +731,7 @@ export const accountingService = {
     const operatingExpensesCents = monthlyExpenses.reduce((sum, e) => sum + (e.amountCents || 0), 0);
 
     // 5. Net Profit & Margins
-    const totalOutflowCents = cogsPurchasesCents + payrollDisbursedCents + operatingExpensesCents;
+    const totalOutflowCents = purchasesPaidCents + payrollDisbursedCents + operatingExpensesCents;
     const netProfitCents = grossRevenueCents - totalOutflowCents;
     const netMarginPercent = grossRevenueCents > 0 ? (netProfitCents / grossRevenueCents) * 100 : 0;
 
@@ -681,11 +739,6 @@ export const accountingService = {
     const cashInOrdersCents = monthlyOrders
       .filter((o) => o.paymentMethod === 'CASH')
       .reduce((sum, o) => sum + (o.totalCents || 0), 0);
-
-    const cashOutPurchasesCents = monthlyPurchases.reduce((sum, p) => {
-      const cashPayments = p.payments?.filter((pm) => pm.method === 'CASH').reduce((s, pm) => s + pm.amountCents, 0) || 0;
-      return sum + cashPayments;
-    }, 0);
 
     const cashOutPayrollCents = monthlyPayroll
       .filter((p) => p.method === 'CASH')

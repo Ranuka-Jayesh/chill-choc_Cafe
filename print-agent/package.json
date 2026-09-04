@@ -1,0 +1,18 @@
+{
+  "name": "cafemm-windows-print-agent",
+  "version": "1.0.0",
+  "description": "Local Windows ESC/POS Print Agent for XPrinter and Thermal POS Printers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "escpos",
+    "xprinter",
+    "thermal-printer",
+    "pos",
+    "windows-spooler"
+  ],
+  "author": "OGO TECHNOLOGY",
+  "license": "ISC"
+}

@@ -4,6 +4,7 @@ import { inventoryService } from './inventoryService';
 import { printerService } from './printerService';
 import { realtimeSocketService } from './realtimeSocketService';
 import { customerService } from './customerService';
+import { directPrintService } from './directPrintService';
 import { Order, OrderItem, PaymentMethod, PaymentSplit, OrderType, HeldOrder } from '@/types';
 import { formatOrderNumber } from '@/utils/format';
 
@@ -315,6 +316,20 @@ export const orderService = {
 
     // 5. Automatically generate Customer Receipt
     await printerService.printCustomerReceipt(order);
+
+    // 5b. Direct Silent Thermal Printing for XPrinter (via Windows Local Print Agent)
+    if (directPrintService.isEnabled()) {
+      if (settings.autoPrintReceipt ?? true) {
+        directPrintService.printCustomerReceipt(order).catch((err) => {
+          console.warn('[DirectPrint] Automatic receipt printing warning:', err);
+        });
+      }
+      if (settings.autoPrintKOT ?? true) {
+        directPrintService.printKitchenTicket(order).catch((err) => {
+          console.warn('[DirectPrint] Automatic KOT printing warning:', err);
+        });
+      }
+    }
 
     // 6. Log Audit
     db.update('auditLogs', (logs) => [

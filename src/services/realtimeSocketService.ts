@@ -23,6 +23,7 @@ export type RealtimeEventType =
   | 'SETTINGS_CHANGED'
   | 'RECEIPT_TEMPLATE_CHANGED'
   | 'STAFF_CHANGED'
+  | 'ATTENDANCE_CHANGED'
   | 'KOT_DISPATCHED'
   | 'DATABASE_SYNC'
   | 'HEARTBEAT_PING'
@@ -44,6 +45,7 @@ class RealtimeSocketService {
   private latencyMs: number = 8;
   private connectedNodes: string[] = ['BACKOFFICE-ADMIN', 'POS-REGISTER-01', 'KITCHEN-KOT-01'];
   private heartbeatTimer: any = null;
+  private processedMessageIds: Set<string> = new Set();
 
   constructor() {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -117,6 +119,13 @@ class RealtimeSocketService {
 
     // 2. Dispatch locally if requested
     if (propagateLocally) {
+      if (msg.id) {
+        this.processedMessageIds.add(msg.id);
+        if (this.processedMessageIds.size > 300) {
+          const first = this.processedMessageIds.values().next().value;
+          if (first) this.processedMessageIds.delete(first);
+        }
+      }
       this.notifySubscribers(msg);
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
@@ -156,6 +165,13 @@ class RealtimeSocketService {
    * Notify subscribers of incoming messages.
    */
   private handleIncomingMessage(msg: RealtimeMessage): void {
+    if (!msg || !msg.id) return;
+    if (this.processedMessageIds.has(msg.id)) return;
+    this.processedMessageIds.add(msg.id);
+    if (this.processedMessageIds.size > 300) {
+      const first = this.processedMessageIds.values().next().value;
+      if (first) this.processedMessageIds.delete(first);
+    }
     this.notifySubscribers(msg);
   }
 
@@ -267,6 +283,10 @@ class RealtimeSocketService {
 
   public emitStaffChanged(user: User): void {
     this.broadcast('STAFF_CHANGED', { user });
+  }
+
+  public emitAttendanceChanged(attendanceRecord: any): void {
+    this.broadcast('ATTENDANCE_CHANGED', { attendanceRecord });
   }
 
   public emitDatabaseSync(key?: string): void {

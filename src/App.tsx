@@ -2,7 +2,9 @@ import React from 'react';
 import { RouterProvider } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
+import { CheckCircle2, AlertCircle, AlertTriangle, Info, Loader2 } from 'lucide-react';
 import { GlobalConfirmModal } from './components/ui/GlobalConfirmModal';
+import { RealtimeNotificationListener } from './components/common/RealtimeNotificationListener';
 import { router } from './app/router';
 
 const queryClient = new QueryClient({
@@ -19,23 +21,17 @@ export const App: React.FC = () => {
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
       <GlobalConfirmModal />
+      <RealtimeNotificationListener />
       <Toaster
         position="top-center"
-        richColors
         closeButton
+        duration={3500}
         icons={{
-          success: <img src="/logobg.webp" alt="Cafe MM" className="w-5 h-5 rounded-full object-contain shrink-0" />,
-          info: <img src="/logobg.webp" alt="Cafe MM" className="w-5 h-5 rounded-full object-contain shrink-0" />,
-          warning: <img src="/logobg.webp" alt="Cafe MM" className="w-5 h-5 rounded-full object-contain shrink-0" />,
-          error: <img src="/logobg.webp" alt="Cafe MM" className="w-5 h-5 rounded-full object-contain shrink-0" />,
-        }}
-        toastOptions={{
-          style: {
-            borderRadius: '18px',
-            fontFamily: "'Plus Jakarta Sans', sans-serif",
-            fontSize: '13px',
-            boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
-          },
+          success: <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 stroke-[2.3]" />,
+          info: <Info className="w-5 h-5 text-sky-600 shrink-0 stroke-[2.3]" />,
+          warning: <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 stroke-[2.3]" />,
+          error: <AlertCircle className="w-5 h-5 text-rose-600 shrink-0 stroke-[2.3]" />,
+          loading: <Loader2 className="w-5 h-5 text-brand-teal animate-spin shrink-0 stroke-[2.3]" />,
         }}
       />
     </QueryClientProvider>

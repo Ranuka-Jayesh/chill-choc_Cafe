@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { useSearchParams } from 'react-router-dom';
+import { format } from 'date-fns';
 import { cashDrawerService } from '@/services/cashDrawerService';
 import { shiftService } from '@/services/shiftService';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
@@ -35,7 +37,7 @@ import { toast } from 'sonner';
 
 const TYPE_FILTER_OPTIONS: SelectOption[] = [
   { value: 'ALL', label: 'All Movements' },
-  { value: 'PENDING_APPROVAL', label: '⚠️ Pending Requests' },
+  { value: 'PENDING_APPROVAL', label: 'Pending Requests' },
   { value: 'CASH_SALE', label: 'POS Cash Sales' },
   { value: 'OPENING_CASH', label: 'Opening Float' },
   { value: 'CASH_IN', label: 'Cash In (Add)' },
@@ -43,6 +45,13 @@ const TYPE_FILTER_OPTIONS: SelectOption[] = [
   { value: 'CASH_REFUND', label: 'Cash Refunds' },
   { value: 'CASH_DROP', label: 'Cash Drop to Safe' },
   { value: 'CLOSING_ADJUSTMENT', label: 'Closing Audit' },
+];
+
+const REQUEST_STATUS_OPTIONS: SelectOption[] = [
+  { value: 'ALL', label: 'All Requests' },
+  { value: 'PENDING_APPROVAL', label: 'Waiting for Admin' },
+  { value: 'APPROVED', label: 'Approved' },
+  { value: 'REJECTED', label: 'Rejected' },
 ];
 
 export const AdminCashDrawerPage: React.FC = () => {
@@ -64,6 +73,17 @@ export const AdminCashDrawerPage: React.FC = () => {
   const [typeFilter, setTypeFilter] = useState('ALL');
   const [search, setSearch] = useState('');
   const [isSearchFocused, setIsSearchFocused] = useState(false);
+
+  // Tab Switcher State: 'movements' | 'requests'
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab = (searchParams.get('tab') as 'movements' | 'requests') || 'movements';
+  const handleTabChange = (tab: 'movements' | 'requests') => {
+    setSearchParams({ tab });
+  };
+
+  // Cashier Requests Status Filter & Review Modal State
+  const [requestStatusFilter, setRequestStatusFilter] = useState('ALL');
+  const [reviewingTx, setReviewingTx] = useState<CashDrawerTransaction | null>(null);
 
   // Modal State for Manual Cash In / Out
   const [isMovementModalOpen, setIsMovementModalOpen] = useState(false);
@@ -121,7 +141,7 @@ export const AdminCashDrawerPage: React.FC = () => {
   const shiftRefunds = activeShift ? activeShift.cashRefunds : 0;
   const shiftCashDrops = activeShift ? (activeShift.cashDrops || 0) : 0;
 
-  // Filtered Transactions
+  // Filtered Transactions for Movements Tab
   const filteredTransactions = useMemo(() => {
     return transactions.filter((t) => {
       // Type Filter
@@ -152,6 +172,61 @@ export const AdminCashDrawerPage: React.FC = () => {
       return true;
     });
   }, [transactions, typeFilter, dateRange, search]);
+
+  // Cashier Requests (All staff-submitted cash requests, drops, or non-order register requests)
+  const cashierRequests = useMemo(() => {
+    return transactions.filter(
+      (t) =>
+        t.status === 'PENDING_APPROVAL' ||
+        Boolean(t.approvedByUserId) ||
+        Boolean(t.rejectedReason) ||
+        (t.type === 'CASH_OUT' && !t.orderId) ||
+        t.type === 'CASH_DROP' ||
+        t.type === 'CASH_IN'
+    );
+  }, [transactions]);
+
+  // Filtered Cashier Requests for Requests Tab
+  const filteredCashierRequests = useMemo(() => {
+    return cashierRequests.filter((req) => {
+      // Month & Year Filter
+      if (dateRange.year !== 'ALL') {
+        const txDate = new Date(req.timestamp);
+        if (String(txDate.getFullYear()) !== dateRange.year) return false;
+        if (dateRange.month !== 'ALL' && String(txDate.getMonth() + 1) !== dateRange.month) return false;
+      }
+
+      // Status Filter
+      if (requestStatusFilter !== 'ALL') {
+        if (req.status !== requestStatusFilter) return false;
+      }
+
+      // Search Filter
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        return (
+          req.cashierName.toLowerCase().includes(q) ||
+          (req.reason && req.reason.toLowerCase().includes(q)) ||
+          req.type.toLowerCase().includes(q) ||
+          formatLKR(Math.abs(req.amount)).toLowerCase().includes(q)
+        );
+      }
+
+      return true;
+    });
+  }, [cashierRequests, dateRange, requestStatusFilter, search]);
+
+  const reqPendingCount = useMemo(() => {
+    return cashierRequests.filter((r) => r.status === 'PENDING_APPROVAL').length;
+  }, [cashierRequests]);
+
+  const reqApprovedCount = useMemo(() => {
+    return cashierRequests.filter((r) => r.status === 'APPROVED').length;
+  }, [cashierRequests]);
+
+  const reqRejectedCount = useMemo(() => {
+    return cashierRequests.filter((r) => r.status === 'REJECTED').length;
+  }, [cashierRequests]);
 
   // Inflow, Outflow & Safe Drop totals in filtered view
   const filteredTotalIn = useMemo(() => {
@@ -187,6 +262,7 @@ export const AdminCashDrawerPage: React.FC = () => {
       toast.success(
         `Approved ${tx.type.replace(/_/g, ' ')} of ${formatLKR(Math.abs(tx.amount))} for ${tx.cashierName}.`
       );
+      setReviewingTx(null);
     } catch (err: any) {
       toast.error(err.message || 'Failed to approve request.');
     }
@@ -212,6 +288,7 @@ export const AdminCashDrawerPage: React.FC = () => {
         reason: reason || 'Rejected by administrator',
       });
       toast.info(`Rejected ${tx.type.replace(/_/g, ' ')} request.`);
+      setReviewingTx(null);
     } catch (err: any) {
       toast.error(err.message || 'Failed to reject request.');
     }
@@ -361,295 +438,484 @@ export const AdminCashDrawerPage: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. PENDING REQUESTS REVIEW BANNER (IF ANY) */}
-      {pendingRequests.length > 0 && (
-        <div className="bg-amber-50/90 border-2 border-amber-300 rounded-2xl p-4 shadow-2xs space-y-3 shrink-0 animate-in fade-in">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-amber-600" />
-              <h4 className="text-xs font-black uppercase text-amber-950 tracking-wider">
-                Pending Cash Movement Requests ({pendingRequests.length})
-              </h4>
-            </div>
-            <span className="text-[10px] font-black uppercase px-2.5 py-0.5 rounded-full bg-amber-500 text-white shadow-2xs">
-              Action Required
+      {/* 2. UNIFIED TAB SWITCHER & CONTEXTUAL CONTROLS */}
+      <div className="flex flex-wrap items-center justify-between gap-3 shrink-0 border-b border-[#EAE3DA] pb-2">
+        {/* Single Unified Tab Bar Container */}
+        <div className="inline-flex items-center p-1 h-11 bg-white border border-[#E0D7CC] rounded-full shadow-xs overflow-x-auto max-w-full">
+          <button
+            type="button"
+            onClick={() => handleTabChange('movements')}
+            className={`h-full flex items-center gap-2.5 px-4 py-2 rounded-full text-xs sm:text-[13px] font-black transition-all cursor-pointer select-none active:scale-98 whitespace-nowrap ${
+              activeTab === 'movements'
+                ? 'bg-brand-teal text-white shadow-teal'
+                : 'text-brand-brown hover:text-brand-brown-deep hover:bg-cream-50'
+            }`}
+          >
+            <Coins className="w-4 h-4" />
+            <span>Drawer Movements</span>
+            <span
+              className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold tabular-nums ${
+                activeTab === 'movements' ? 'bg-white/20 text-white' : 'bg-cream-100 text-brand-brown-dark'
+              }`}
+            >
+              {filteredTransactions.length}
             </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleTabChange('requests')}
+            className={`h-full flex items-center gap-2.5 px-4 py-2 rounded-full text-xs sm:text-[13px] font-black transition-all cursor-pointer select-none active:scale-98 whitespace-nowrap ${
+              activeTab === 'requests'
+                ? 'bg-brand-teal text-white shadow-teal'
+                : 'text-brand-brown hover:text-brand-brown-deep hover:bg-cream-50'
+            }`}
+          >
+            <Clock className="w-4 h-4" />
+            <span>Cashier Requests</span>
+            {pendingRequests.length > 0 ? (
+              <span className="w-5 h-5 min-w-[20px] rounded-full text-[10px] font-black bg-[#E99343] text-[#251814] flex items-center justify-center leading-none shadow-xs">
+                {pendingRequests.length}
+              </span>
+            ) : (
+              <span
+                className={`px-2 py-0.5 rounded-full text-[11px] font-extrabold tabular-nums ${
+                  activeTab === 'requests' ? 'bg-white/20 text-white' : 'bg-cream-100 text-brand-brown-dark'
+                }`}
+              >
+                {cashierRequests.length}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* Right side controls based on active tab */}
+        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
+          {activeTab === 'movements' && (
+            <>
+              <button
+                type="button"
+                onClick={() => setIsMovementModalOpen(true)}
+                className="h-9 px-4 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Record Movement</span>
+              </button>
+
+              <div className="w-[170px] sm:w-[185px]">
+                <CustomSelect
+                  value={typeFilter}
+                  onChange={(val) => setTypeFilter(val)}
+                  options={TYPE_FILTER_OPTIONS}
+                  buttonClassName="h-9 !py-0 px-3.5 bg-[#FAF7F2] hover:bg-cream-100 border-[#E0D7CC] rounded-full text-xs font-bold text-brand-brown-dark shadow-xs"
+                />
+              </div>
+
+              <MonthYearPicker
+                value={dateRange}
+                onChange={(newVal) => setDateRange(newVal)}
+              />
+            </>
+          )}
+
+          {activeTab === 'requests' && (
+            <>
+              <div className="w-[170px] sm:w-[185px]">
+                <CustomSelect
+                  value={requestStatusFilter}
+                  onChange={(val) => setRequestStatusFilter(val)}
+                  options={REQUEST_STATUS_OPTIONS}
+                  buttonClassName="h-9 !py-0 px-3.5 bg-[#FAF7F2] hover:bg-cream-100 border-[#E0D7CC] rounded-full text-xs font-bold text-brand-brown-dark shadow-xs"
+                />
+              </div>
+
+              <MonthYearPicker
+                value={dateRange}
+                onChange={(newVal) => setDateRange(newVal)}
+              />
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* PENDING STAFF CASH MOVEMENT REQUESTS (SLEEK TABLE PATTERN MATCHING STOCK PAGE) */}
+      {pendingRequests.length > 0 && activeTab !== 'requests' && (
+        <div className="bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-2 shrink-0 animate-in fade-in slide-in-from-top-1">
+          <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50/50 border-b border-[#EAE3DA]">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              <span className="text-xs font-black text-brand-brown-deep tracking-wider uppercase flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-700" />
+                <span>Pending Cash Movement Requests ({pendingRequests.length} waiting authorization)</span>
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => handleTabChange('requests')}
+              className="text-[11px] font-bold text-amber-800 hover:text-amber-950 hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <span>Manage all in Requests tab</span>
+              <span>→</span>
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {pendingRequests.map((req) => (
-              <div
-                key={req.id}
-                className="bg-white rounded-2xl p-3.5 border border-amber-200 shadow-2xs space-y-2 flex flex-col justify-between"
-              >
-                <div className="space-y-1 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={`px-2 py-0.5 rounded-full font-black text-[9.5px] uppercase ${
-                        req.type === 'CASH_OUT'
-                          ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                          : 'bg-brand-brown/10 text-brand-brown-dark border border-brand-brown/20'
-                      }`}
-                    >
-                      {req.type.replace(/_/g, ' ')}
-                    </span>
-                    <span className="text-sm font-black text-rose-700 tabular-nums">
+          <div className="overflow-x-auto max-h-56 overflow-y-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-2xs">
+                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
+                  <th className="py-2.5 px-3.5 bg-[#FAF7F2]/95">Type</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-right">Amount</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Staff / Cashier & Reason</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Shift / Terminal</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Time</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#F0EAE2]">
+                {pendingRequests.map((req) => (
+                  <tr
+                    key={req.id}
+                    onClick={() => setReviewingTx(req)}
+                    className="hover:bg-[#FAF7F2]/80 transition-colors group cursor-pointer"
+                    title="Click to view details and review request"
+                  >
+                    <td className="py-2.5 px-3.5 whitespace-nowrap">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border shadow-2xs ${
+                          req.type === 'CASH_OUT'
+                            ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : req.type === 'CASH_DROP'
+                            ? 'bg-amber-50 text-amber-800 border-amber-300'
+                            : 'bg-teal-50 text-brand-teal-dark border-teal-200'
+                        }`}
+                      >
+                        {req.type.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                    <td className="py-2.5 px-3 text-right whitespace-nowrap font-black text-rose-700 text-sm tabular-nums">
                       {formatLKR(Math.abs(req.amount))}
-                    </span>
-                  </div>
-
-                  <div className="font-bold text-brand-brown-dark pt-1">
-                    Staff: <span className="font-extrabold">{req.cashierName}</span>
-                  </div>
-                  <div className="text-text-secondary text-[11px]">
-                    Reason: <strong className="text-amber-950">{req.reason || 'General expense'}</strong>
-                  </div>
-                  <div className="text-[10px] text-text-muted">
-                    {formatDateTime(req.timestamp)}
-                  </div>
-                </div>
-
-                <div className="pt-2 border-t border-amber-100 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleRejectRequest(req)}
-                    className="px-3 py-1.5 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-all cursor-pointer"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApproveRequest(req)}
-                    className="flex items-center gap-1 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-2xs transition-all active:scale-95 cursor-pointer"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Approve</span>
-                  </button>
-                </div>
-              </div>
-            ))}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-brand-brown-dark text-xs">{req.cashierName}:</span>
+                        <span className="text-text-muted text-[11px] truncate max-w-xs">{req.reason || 'General expense'}</span>
+                      </div>
+                    </td>
+                    <td className="py-2.5 px-3 text-center text-text-secondary text-xs">
+                      {req.terminalId || 'POS-01'}
+                    </td>
+                    <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono font-bold text-[11px] bg-cream-100/70 text-brand-brown border border-[#E0D7CC]">
+                        <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                        <span>{format(new Date(req.timestamp), 'hh:mm a')}</span>
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {/* 3. SUB-HEADER BAR: Live Stats on Left, Custom Dropdown & Month Year Picker on Right */}
-      <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shrink-0">
-        {/* Left: Live Statistics with Color Dots */}
-        <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs select-none">
+      {/* 3. SUB-HEADER BAR: Live Stats */}
+      {activeTab === 'movements' ? (
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs select-none shrink-0">
           <div className="flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-brand-teal shrink-0" />
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Total:</span>
             <span className="font-black text-xs text-brand-brown-dark tabular-nums">{filteredTransactions.length}</span>
             <span className="text-[10px] text-text-muted font-medium">movements</span>
           </div>
-
           <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
             <span className="w-2 h-2 rounded-full bg-status-success shrink-0" />
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Inflow:</span>
             <span className="font-black text-xs text-status-success tabular-nums">{formatLKR(filteredTotalIn)}</span>
           </div>
-
           <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
             <span className="w-2 h-2 rounded-full bg-status-danger shrink-0" />
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Outflow:</span>
             <span className="font-black text-xs text-status-danger tabular-nums">{formatLKR(filteredTotalOut)}</span>
           </div>
-
           <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
             <span className="w-2 h-2 rounded-full bg-amber-600 shrink-0" />
             <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Safe Drops:</span>
             <span className="font-black text-xs text-amber-900 tabular-nums">{formatLKR(filteredTotalDrops)}</span>
           </div>
         </div>
-
-        {/* Right: Custom Designed Dropdown & Month Year Picker */}
-        <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
-          <div className="w-[170px] sm:w-[185px]">
-            <CustomSelect
-              value={typeFilter}
-              onChange={(val) => setTypeFilter(val)}
-              options={TYPE_FILTER_OPTIONS}
-              buttonClassName="h-9 !py-0 px-3.5 bg-[#FAF7F2] hover:bg-cream-100 border-[#E0D7CC] rounded-full text-xs font-bold text-brand-brown-dark shadow-xs"
-            />
+      ) : (
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs select-none shrink-0">
+          <div className="flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-brand-teal shrink-0" />
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Total Requests:</span>
+            <span className="font-black text-xs text-brand-brown-dark tabular-nums">{filteredCashierRequests.length}</span>
           </div>
-
-          <MonthYearPicker
-            value={dateRange}
-            onChange={(newVal) => setDateRange(newVal)}
-          />
+          {reqPendingCount > 0 && (
+            <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-900">Waiting for Admin:</span>
+              <span className="font-black text-xs text-amber-900 tabular-nums">{reqPendingCount}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
+            <span className="w-2 h-2 rounded-full bg-status-success shrink-0" />
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Approved:</span>
+            <span className="font-black text-xs text-status-success tabular-nums">{reqApprovedCount}</span>
+          </div>
+          {reqRejectedCount > 0 && (
+            <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
+              <span className="w-2 h-2 rounded-full bg-status-danger shrink-0" />
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-status-danger">Rejected:</span>
+              <span className="font-black text-xs text-status-danger tabular-nums">{reqRejectedCount}</span>
+            </div>
+          )}
         </div>
-      </div>
+      )}
 
       {/* 4. MAIN DATA TABLE AREA */}
-      <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
-        <div className="flex-1 overflow-auto min-h-0 pb-32">
-          <table className="w-full text-left text-xs border-collapse">
-            <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-xs">
-              <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
-                <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Timestamp</th>
-                <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Movement Type</th>
-                <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Cashier / Staff</th>
-                <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Details / Reason</th>
-                <th className="py-3.5 px-4 text-center bg-[#FAF7F2]/95">Status</th>
-                <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Movement (LKR)</th>
-                <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Balance After</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#F2ECE4] font-medium">
-              {filteredTransactions.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="text-center py-20 text-text-muted">
-                    <Coins className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
-                    <div className="font-semibold text-xs text-text-secondary">
-                      No cash drawer transactions recorded for this period.
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearch('');
-                        setTypeFilter('ALL');
-                      }}
-                      className="mt-3 px-3.5 py-1 text-xs font-black text-brand-teal hover:underline cursor-pointer"
-                    >
-                      Reset filters
-                    </button>
-                  </td>
+      {activeTab === 'movements' ? (
+        <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
+          <div className="flex-1 overflow-auto min-h-0 pb-32">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-xs">
+                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Timestamp</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Movement Type</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Cashier / Staff</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Details / Reason</th>
+                  <th className="py-3.5 px-4 text-center bg-[#FAF7F2]/95">Status</th>
+                  <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Movement (LKR)</th>
+                  <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Balance After</th>
                 </tr>
-              ) : (
-                filteredTransactions.map((tx) => {
-                  const isPositive = tx.amount >= 0;
-                  const isSale = tx.type === 'CASH_SALE';
-                  const isOpening = tx.type === 'OPENING_CASH';
-                  const isIn = tx.type === 'CASH_IN';
-                  const isRefund = tx.type === 'CASH_REFUND';
-                  const isDrop = tx.type === 'CASH_DROP';
-                  const isOut = tx.type === 'CASH_OUT';
-                  const isPending = tx.status === 'PENDING_APPROVAL';
-                  const isRejected = tx.status === 'REJECTED';
+              </thead>
+              <tbody className="divide-y divide-[#F2ECE4] font-medium">
+                {filteredTransactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="text-center py-20 text-text-muted">
+                      <Coins className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
+                      <div className="font-semibold text-xs text-text-secondary">
+                        No cash drawer transactions recorded for this period.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearch('');
+                          setTypeFilter('ALL');
+                        }}
+                        className="mt-3 px-3.5 py-1 text-xs font-black text-brand-teal hover:underline cursor-pointer"
+                      >
+                        Reset filters
+                      </button>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredTransactions.map((tx) => {
+                    const isPositive = tx.amount >= 0;
+                    const isSale = tx.type === 'CASH_SALE';
+                    const isOpening = tx.type === 'OPENING_CASH';
+                    const isIn = tx.type === 'CASH_IN';
+                    const isRefund = tx.type === 'CASH_REFUND';
+                    const isDrop = tx.type === 'CASH_DROP';
+                    const isOut = tx.type === 'CASH_OUT';
+                    const isPending = tx.status === 'PENDING_APPROVAL';
+                    const isRejected = tx.status === 'REJECTED';
 
-                  return (
-                    <tr
-                      key={tx.id}
-                      className={`hover:bg-[#FAF7F2]/70 transition-colors group ${
-                        isPending ? 'bg-amber-50/40' : ''
-                      }`}
-                    >
-                      {/* Timestamp */}
-                      <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
-                        {formatDateTime(tx.timestamp)}
-                      </td>
-
-                      {/* Movement Type Badge */}
-                      <td className="py-3.5 px-4">
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border inline-flex items-center gap-1.5 ${
-                            isSale || isOpening || isIn
-                              ? 'bg-status-success-bg text-status-success border-status-success/30'
-                              : isRefund || isOut
-                              ? 'bg-status-danger-bg text-status-danger border-status-danger/30'
-                              : isDrop
-                              ? 'bg-amber-50 text-amber-900 border-amber-300'
-                              : 'bg-amber-50 text-amber-800 border-amber-200'
-                          }`}
-                        >
-                          {isDrop ? (
-                            <Building2 className="w-3 h-3 text-amber-800 shrink-0" />
-                          ) : isPositive ? (
-                            <ArrowDownRight className="w-3 h-3 text-status-success shrink-0" />
-                          ) : (
-                            <ArrowUpRight className="w-3 h-3 text-status-danger shrink-0" />
-                          )}
-                          <span>{isDrop ? 'CASH DROP' : tx.type.replace(/_/g, ' ')}</span>
-                        </span>
-                      </td>
-
-                      {/* Cashier Name */}
-                      <td className="py-3.5 px-4 font-black text-brand-brown-dark">
-                        {tx.cashierName}
-                      </td>
-
-                      {/* Details / Reason */}
-                      <td className="py-3.5 px-4 text-text-secondary max-w-[280px]">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          {tx.orderNumber && (
-                            <span className="px-2 py-0.2 rounded-md bg-teal-50 border border-teal-200 text-brand-teal font-black text-[10px] shrink-0">
-                              {tx.orderNumber}
-                            </span>
-                          )}
-                          <span className="truncate">{tx.reason || 'General register movement'}</span>
-                        </div>
-                      </td>
-
-                      {/* Status Column with Inline Actions */}
-                      <td className="py-3.5 px-4 text-center whitespace-nowrap">
-                        {isPending ? (
-                          <div className="flex items-center justify-center gap-1.5">
-                            <span className="px-2.5 py-0.5 rounded-full font-extrabold text-[9.5px] uppercase bg-amber-500 text-white shadow-2xs animate-pulse inline-flex items-center gap-1">
+                    return (
+                      <tr
+                        key={tx.id}
+                        onClick={isPending ? () => setReviewingTx(tx) : undefined}
+                        className={`hover:bg-[#FAF7F2]/70 transition-colors group ${
+                          isPending ? 'bg-amber-50/40 cursor-pointer' : ''
+                        }`}
+                        title={isPending ? 'Click to review and authorize request' : undefined}
+                      >
+                        <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
+                          {formatDateTime(tx.timestamp)}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border inline-flex items-center gap-1.5 ${
+                              isSale || isOpening || isIn
+                                ? 'bg-status-success-bg text-status-success border-status-success/30'
+                                : isRefund || isOut
+                                ? 'bg-status-danger-bg text-status-danger border-status-danger/30'
+                                : isDrop
+                                ? 'bg-amber-50 text-amber-900 border-amber-300'
+                                : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {isDrop ? (
+                              <Building2 className="w-3 h-3 text-amber-800 shrink-0" />
+                            ) : isPositive ? (
+                              <ArrowDownRight className="w-3 h-3 text-status-success shrink-0" />
+                            ) : (
+                              <ArrowUpRight className="w-3 h-3 text-status-danger shrink-0" />
+                            )}
+                            <span>{isDrop ? 'CASH DROP' : tx.type.replace(/_/g, ' ')}</span>
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 font-black text-brand-brown-dark">
+                          {tx.cashierName}
+                        </td>
+                        <td className="py-3.5 px-4 text-text-secondary max-w-[280px]">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            {tx.orderNumber && (
+                              <span className="px-2 py-0.2 rounded-md bg-teal-50 border border-teal-200 text-brand-teal font-black text-[10px] shrink-0">
+                                {tx.orderNumber}
+                              </span>
+                            )}
+                            <span className="truncate">{tx.reason || 'General register movement'}</span>
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 text-center whitespace-nowrap">
+                          {isPending ? (
+                            <span className="px-2.5 py-0.5 rounded-full font-extrabold text-[9.5px] uppercase bg-amber-500 text-white shadow-2xs inline-flex items-center gap-1">
                               <Clock className="w-2.5 h-2.5" />
                               PENDING
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => handleApproveRequest(tx)}
-                              className="p-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs transition-all active:scale-95 cursor-pointer"
-                              title="Approve request"
-                            >
-                              <Check className="w-3 h-3" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRejectRequest(tx)}
-                              className="p-1 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 transition-all cursor-pointer"
-                              title="Reject request"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </div>
-                        ) : isRejected ? (
-                          <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-rose-50 text-rose-700 border border-rose-200">
-                            REJECTED
+                          ) : isRejected ? (
+                            <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-rose-50 text-rose-700 border border-rose-200">
+                              REJECTED
+                            </span>
+                          ) : (
+                            <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-status-success-bg text-status-success border border-status-success/30">
+                              APPROVED
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          <span
+                            className={`font-black text-xs tabular-nums ${
+                              isRejected
+                                ? 'text-text-muted line-through'
+                                : isPositive
+                                ? 'text-status-success'
+                                : 'text-status-danger'
+                            }`}
+                          >
+                            {isPositive ? `+${formatLKR(tx.amount)}` : formatLKR(tx.amount)}
                           </span>
-                        ) : (
-                          <span className="px-2.5 py-0.5 rounded-full font-black text-[9.5px] uppercase bg-status-success-bg text-status-success border border-status-success/30">
-                            APPROVED
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Movement Amount */}
-                      <td className="py-3.5 px-4 text-right">
-                        <span
-                          className={`font-black text-xs tabular-nums ${
-                            isRejected
-                              ? 'text-text-muted line-through'
-                              : isPositive
-                              ? 'text-status-success'
-                              : 'text-status-danger'
-                          }`}
-                        >
-                          {isPositive ? `+${formatLKR(tx.amount)}` : formatLKR(tx.amount)}
-                        </span>
-                      </td>
-
-                      {/* Balance After */}
-                      <td className="py-3.5 px-4 text-right font-black text-brand-brown-deep tabular-nums">
-                        {formatLKR(tx.balanceAfter)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-
-              {/* Bottom Spacer Row to Ensure Last Record is Never Hidden by Floating Capsule */}
-              {filteredTransactions.length > 0 && (
-                <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
-                  <td colSpan={7} className="h-24 bg-transparent border-0" />
-                </tr>
-              )}
-            </tbody>
-          </table>
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-black text-brand-brown-deep tabular-nums">
+                          {formatLKR(tx.balanceAfter)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+                {filteredTransactions.length > 0 && (
+                  <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
+                    <td colSpan={7} className="h-24 bg-transparent border-0" />
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
+          <div className="flex-1 overflow-auto min-h-0 pb-32">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-xs">
+                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Timestamp</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Request Type</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Staff / Cashier</th>
+                  <th className="py-3.5 px-4 bg-[#FAF7F2]/95">Reason / Justification</th>
+                  <th className="py-3.5 px-4 text-center bg-[#FAF7F2]/95">Approval Status</th>
+                  <th className="py-3.5 px-4 text-right bg-[#FAF7F2]/95">Requested Amount</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#F2ECE4] font-medium">
+                {filteredCashierRequests.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="text-center py-20 text-text-muted">
+                      <Clock className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
+                      <div className="font-semibold text-xs text-text-secondary">
+                        No cashier requests recorded for this period.
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearch('');
+                          setRequestStatusFilter('ALL');
+                        }}
+                        className="mt-3 px-3.5 py-1 text-xs font-black text-brand-teal hover:underline cursor-pointer"
+                      >
+                        Reset filters
+                      </button>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredCashierRequests.map((req) => {
+                    const isPending = req.status === 'PENDING_APPROVAL';
+                    const isApproved = req.status === 'APPROVED';
+                    const isRejected = req.status === 'REJECTED';
+
+                    return (
+                      <tr
+                        key={req.id}
+                        onClick={() => setReviewingTx(req)}
+                        className={`hover:bg-[#FAF7F2]/80 transition-colors group cursor-pointer ${
+                          isPending ? 'bg-amber-50/40' : ''
+                        }`}
+                        title="Click to view details and review request"
+                      >
+                        <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
+                          {formatDateTime(req.timestamp)}
+                        </td>
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border inline-flex items-center gap-1.5 ${
+                              req.type === 'CASH_OUT'
+                                ? 'bg-status-danger-bg text-status-danger border-status-danger/30'
+                                : req.type === 'CASH_DROP'
+                                ? 'bg-amber-50 text-amber-900 border-amber-300'
+                                : 'bg-status-success-bg text-status-success border-status-success/30'
+                            }`}
+                          >
+                            {req.type.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 font-bold text-brand-brown-dark">
+                          {req.cashierName}
+                        </td>
+                        <td className="py-3.5 px-4 text-text-secondary max-w-xs truncate">
+                          {req.reason || 'General expense'}
+                        </td>
+                        <td className="py-3.5 px-4 text-center">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border ${
+                              isPending
+                                ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                : isApproved
+                                ? 'bg-status-success-bg text-status-success border-status-success/30'
+                                : 'bg-rose-100 text-rose-900 border-rose-300'
+                            }`}
+                          >
+                            {isPending
+                              ? 'Waiting for Admin'
+                              : isApproved
+                              ? 'Approved'
+                              : 'Rejected'}
+                          </span>
+                        </td>
+                        <td className="py-3.5 px-4 text-right font-mono font-black text-rose-700 text-sm tabular-nums">
+                          {formatLKR(Math.abs(req.amount))}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+                {filteredCashierRequests.length > 0 && (
+                  <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
+                    <td colSpan={6} className="h-24 bg-transparent border-0" />
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* 4. FLOATING BOTTOM POP-UP SEARCH & ACTION PILL */}
       <div className="fixed bottom-10 left-1/2 -translate-x-1/2 z-30 flex items-center justify-center pointer-events-none select-none">
@@ -746,7 +1012,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                       {[
                         { id: 'CASH_IN', label: '+ Cash In (Add)' },
                         { id: 'CASH_OUT', label: '- Cash Out (Payout)' },
-                        { id: 'CASH_DROP', label: '⬇ Safe Cash Drop' },
+                        { id: 'CASH_DROP', label: 'Safe Cash Drop' },
                       ].map((t) => (
                         <button
                           key={t.id}
@@ -814,6 +1080,135 @@ export const AdminCashDrawerPage: React.FC = () => {
                     />
                   </div>
                 </form>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
+      {/* 6. MODAL: REVIEW CASH MOVEMENT REQUEST (MATCHING STOCK RECORD ADJUSTMENT PATTERN) */}
+      {reviewingTx &&
+        createPortal(
+          <div className="fixed inset-0 z-[99999] w-full h-full bg-black/60 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-hidden animate-in fade-in">
+            <div className="w-full max-w-lg sm:max-w-xl flex flex-col max-h-[92vh]">
+              {/* Header above card on dark backdrop */}
+              <div className="flex items-center justify-between gap-3 mb-3 px-1 shrink-0">
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-extrabold text-base sm:text-lg text-white drop-shadow-xs truncate">
+                    Cash Movement Request
+                  </h3>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setReviewingTx(null)}
+                    className="px-4 py-2 rounded-full border border-white/30 text-white hover:bg-white/10 text-xs font-bold transition-all whitespace-nowrap cursor-pointer"
+                  >
+                    Close
+                  </button>
+                  {reviewingTx.status === 'PENDING_APPROVAL' && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => handleRejectRequest(reviewingTx)}
+                        className="px-4 py-2 rounded-full border border-rose-400 bg-rose-500/80 hover:bg-rose-600 text-white text-xs font-bold transition-all whitespace-nowrap cursor-pointer"
+                      >
+                        Reject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleApproveRequest(reviewingTx)}
+                        className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                      >
+                        Approve Movement
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {/* White rounded-3xl card */}
+              <div className="w-full bg-white rounded-3xl shadow-2xl border border-[#E9E0D5] overflow-y-auto">
+                <div className="p-5 sm:p-6 space-y-4">
+                  {/* Field 1: Movement Type */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Movement Type
+                    </label>
+                    <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
+                      <span className="font-extrabold">{reviewingTx.type.replace(/_/g, ' ')}</span>
+                      <span className="text-xs font-bold text-brand-teal">
+                        Shift: #{reviewingTx.shiftId ? reviewingTx.shiftId.slice(-4) : '104'} ({reviewingTx.terminalId || 'POS-01'})
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Field 2: Requested Amount */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Requested Amount
+                    </label>
+                    <div className="h-12 px-4 bg-cream-50/70 border border-[#E2D8CC] rounded-2xl flex items-center justify-between">
+                      <span className="text-xs font-bold text-text-muted">Total Movement:</span>
+                      <span className="text-xl font-black text-rose-700 font-mono">
+                        {formatLKR(Math.abs(reviewingTx.amount))}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Field 3: Cashier / Staff */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Requested By Staff
+                    </label>
+                    <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
+                      <span>{reviewingTx.cashierName}</span>
+                      <span className="text-xs font-mono text-text-muted">
+                        ID: {reviewingTx.cashierId}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Field 4: Reason / Note */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Reason / Justification Note <span className="text-status-danger">*</span>
+                    </label>
+                    <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark">
+                      {reviewingTx.reason || 'No specific justification note provided.'}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-text-muted pt-2 px-0.5">
+                      <span>
+                        Ref: <strong className="font-mono text-brand-brown-dark">{reviewingTx.id}</strong>
+                      </span>
+                      <span>
+                        Submitted: {formatDateTime(reviewingTx.timestamp)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Field 5: Approved/Rejected Details */}
+                  {reviewingTx.status === 'APPROVED' && (
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-2xl text-xs text-emerald-900">
+                      <div className="font-bold text-[11px] uppercase tracking-wider mb-0.5 text-emerald-950">
+                        Approved By Administrator
+                      </div>
+                      <div>
+                        {reviewingTx.approvedByUserName || 'Administrator'}{' '}
+                        {reviewingTx.approvedAt && `at ${formatDateTime(reviewingTx.approvedAt)}`}
+                      </div>
+                    </div>
+                  )}
+
+                  {reviewingTx.rejectedReason && (
+                    <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-800">
+                      <div className="font-bold text-[11px] uppercase tracking-wider mb-0.5 text-rose-900">
+                        Declined By Administrator
+                      </div>
+                      <div>{reviewingTx.rejectedReason}</div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>,

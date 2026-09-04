@@ -9,6 +9,7 @@ import {
   PurchasePaymentSplit,
   PurchasePaymentStatus,
   StockRequest,
+  Supplier,
 } from '@/types';
 import { realtimeSocketService } from './realtimeSocketService';
 import { cashDrawerService } from './cashDrawerService';
@@ -278,17 +279,22 @@ export const inventoryService = {
     reason: string;
     userId: string;
     userName: string;
+    expiryDate?: string;
   }): void => {
     const ing = db.getSnapshot().ingredients.find((i) => i.id === params.ingredientId);
     if (!ing) return;
 
     const diff = params.newStock - ing.currentStock;
-    if (diff === 0) return;
+    if (diff === 0 && (!params.expiryDate || params.expiryDate === ing.expiryDate)) return;
 
-    const type = diff > 0 ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT';
+    const type = diff >= 0 ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT';
 
     db.update('ingredients', (list) =>
-      list.map((i) => (i.id === params.ingredientId ? { ...i, currentStock: params.newStock } : i))
+      list.map((i) =>
+        i.id === params.ingredientId
+          ? { ...i, currentStock: params.newStock, ...(params.expiryDate ? { expiryDate: params.expiryDate } : {}) }
+          : i
+      )
     );
 
     const movement: InventoryMovement = {
@@ -336,8 +342,28 @@ export const inventoryService = {
     dueDate?: string;
     notes?: string;
   }): Purchase => {
-    const paidCents = data.paidCents ?? data.totalCents;
-    const dueCents = data.dueCents ?? Math.max(0, data.totalCents - paidCents);
+    // Normalize payments and set CHEQUE status to PENDING until cleared
+    const normalizedPayments: PurchasePaymentSplit[] = (data.payments || []).map((pm, idx) => ({
+      ...pm,
+      id: pm.id || `pm_${Date.now()}_${idx}`,
+      method: pm.method,
+      amountCents: pm.amountCents,
+      chequeNumber: pm.chequeNumber,
+      bankName: pm.bankName,
+      chequeDate: pm.chequeDate,
+      chequeStatus: pm.method === 'CHEQUE' ? (pm.chequeStatus || 'PENDING') : 'CLEARED',
+      clearedAt: pm.method === 'CHEQUE' ? (pm.chequeStatus === 'CLEARED' ? (pm.clearedAt || pm.timestamp || new Date().toISOString()) : undefined) : (pm.timestamp || new Date().toISOString()),
+      timestamp: pm.timestamp || new Date().toISOString(),
+      notes: pm.notes,
+    }));
+
+    // Realized / cleared payments
+    const clearedPaidCents = normalizedPayments
+      .filter((p) => p.method !== 'CHEQUE' || p.chequeStatus === 'CLEARED')
+      .reduce((sum, p) => sum + p.amountCents, 0);
+
+    const paidCents = data.paidCents !== undefined ? data.paidCents : clearedPaidCents;
+    const dueCents = data.dueCents !== undefined ? data.dueCents : Math.max(0, data.totalCents - paidCents);
     const paymentStatus: PurchasePaymentStatus =
       data.paymentStatus ??
       (dueCents === 0 ? 'PAID' : paidCents > 0 ? 'PARTIAL' : 'UNPAID');
@@ -357,7 +383,7 @@ export const inventoryService = {
       paidCents,
       dueCents,
       dueDate: dueCents > 0 ? data.dueDate : undefined,
-      payments: data.payments || [],
+      payments: normalizedPayments,
       items: data.items,
       notes: data.notes,
       receivedAt: new Date().toISOString(),
@@ -432,8 +458,17 @@ export const inventoryService = {
     db.update('purchases', (list) =>
       list.map((po) => {
         if (po.id !== purchaseId) return po;
-        const payments = [...(po.payments || []), payment];
-        const newPaidCents = payments.reduce((sum, p) => sum + p.amountCents, 0);
+        const normalizedPayment: PurchasePaymentSplit = {
+          ...payment,
+          id: payment.id || `pm_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+          chequeStatus: payment.method === 'CHEQUE' ? (payment.chequeStatus || 'PENDING') : 'CLEARED',
+          clearedAt: payment.method === 'CHEQUE' && payment.chequeStatus === 'CLEARED' ? (payment.clearedAt || new Date().toISOString()) : undefined,
+          timestamp: payment.timestamp || new Date().toISOString(),
+        };
+        const payments = [...(po.payments || []), normalizedPayment];
+        const newPaidCents = payments
+          .filter((p) => p.method !== 'CHEQUE' || p.chequeStatus === 'CLEARED')
+          .reduce((sum, p) => sum + p.amountCents, 0);
         const newDueCents = Math.max(0, po.totalCents - newPaidCents);
         const newPaymentStatus: PurchasePaymentStatus =
           newDueCents === 0 ? 'PAID' : newPaidCents > 0 ? 'PARTIAL' : 'UNPAID';
@@ -448,6 +483,63 @@ export const inventoryService = {
         return updatedPO;
       })
     );
+    if (updatedPO) {
+      realtimeSocketService.emitStockChanged(undefined, { action: 'PURCHASE_PAYMENT_RECORDED', purchase: updatedPO });
+    }
+    return updatedPO;
+  },
+
+  // Mark a pending cheque payment as cleared / paid by supplier
+  clearPurchaseChequePayment: (params: {
+    purchaseId: string;
+    chequeNumber?: string;
+    clearedDate?: string;
+    notes?: string;
+  }): Purchase | null => {
+    let updatedPO: Purchase | null = null;
+    db.update('purchases', (list) =>
+      list.map((po) => {
+        if (po.id !== params.purchaseId) return po;
+        let didClear = false;
+        const payments = (po.payments || []).map((pm) => {
+          if (pm.method === 'CHEQUE' && pm.chequeStatus !== 'CLEARED') {
+            if (!params.chequeNumber || pm.chequeNumber === params.chequeNumber) {
+              didClear = true;
+              return {
+                ...pm,
+                chequeStatus: 'CLEARED' as const,
+                clearedAt: params.clearedDate ? new Date(params.clearedDate).toISOString() : new Date().toISOString(),
+                notes: params.notes ? (pm.notes ? `${pm.notes} | ${params.notes}` : params.notes) : pm.notes,
+              };
+            }
+          }
+          return pm;
+        });
+
+        if (!didClear) return po;
+
+        const newPaidCents = payments
+          .filter((p) => p.method !== 'CHEQUE' || p.chequeStatus === 'CLEARED')
+          .reduce((sum, p) => sum + p.amountCents, 0);
+        const newDueCents = Math.max(0, po.totalCents - newPaidCents);
+        const newPaymentStatus: PurchasePaymentStatus =
+          newDueCents === 0 ? 'PAID' : newPaidCents > 0 ? 'PARTIAL' : 'UNPAID';
+
+        updatedPO = {
+          ...po,
+          payments,
+          paidCents: newPaidCents,
+          dueCents: newDueCents,
+          dueDate: newDueCents > 0 ? po.dueDate : undefined,
+          paymentStatus: newPaymentStatus,
+        };
+        return updatedPO;
+      })
+    );
+
+    if (updatedPO) {
+      realtimeSocketService.emitStockChanged(undefined, { action: 'PURCHASE_CHEQUE_CLEARED', purchase: updatedPO });
+    }
     return updatedPO;
   },
 
@@ -464,6 +556,7 @@ export const inventoryService = {
     reason: string;
     userId: string;
     userName: string;
+    expiryDate?: string;
   }): StockRequest => {
     const diff = Number((data.requestedStock - data.currentStock).toFixed(3));
     const request: StockRequest = {
@@ -476,6 +569,7 @@ export const inventoryService = {
       requestedStock: data.requestedStock,
       quantityChange: diff,
       unit: data.unit,
+      expiryDate: data.expiryDate,
       reason: data.reason.trim() || 'Inventory physical count audit discrepancy',
       requestedByUserId: data.userId,
       requestedByUserName: data.userName,
@@ -550,7 +644,7 @@ export const inventoryService = {
       supplierName: data.supplierName?.trim() || 'Direct Supplier Delivery',
       invoiceNumber: data.invoiceNumber?.trim() || `INV-${Date.now().toString().slice(-4)}`,
       expiryDate: firstItem?.expiryDate || data.expiryDate,
-      reason: data.reason?.trim() || `Goods Delivery Received (${items.length > 0 ? `${items.length} lines` : ingredientName})`,
+      reason: data.reason?.trim() || `Goods Delivery Received (${items.length > 0 ? (items.length === 1 ? firstItem?.ingredientName : `${items.length} items`) : ingredientName})`,
       requestedByUserId: data.userId,
       requestedByUserName: data.userName,
       status: 'PENDING_APPROVAL',
@@ -586,6 +680,7 @@ export const inventoryService = {
         reason: `[Approved Staff Request] ${req.reason} (Submitted by ${req.requestedByUserName}, approved by ${params.adminName})`,
         userId: params.adminId,
         userName: params.adminName,
+        expiryDate: finalExpiry,
       });
     } else if (req.type === 'STOCK_DELIVERY') {
       const items: PurchaseItem[] = req.items && req.items.length > 0
@@ -698,4 +793,62 @@ export const inventoryService = {
     return updatedReq;
   },
 };
+
+/**
+ * Resolves ingredients strictly available for a selected supplier.
+ * - If no supplier is selected (direct store/market purchase), returns all catalog ingredients.
+ * - If a specific supplier is selected, ONLY returns ingredients supplied by that supplier
+ *   (both linked via ingredient.supplierId AND configured in supplier.providedItems).
+ */
+export const getSupplierAvailableIngredients = (
+  supplierId: string,
+  suppliers: Supplier[],
+  ingredients: Ingredient[]
+): Ingredient[] => {
+  if (!supplierId) {
+    return ingredients;
+  }
+  const sup = suppliers.find((s) => s.id === supplierId);
+  if (!sup) return ingredients;
+
+  // 1. Ingredients directly linked with supplierId
+  const linkedIngs = ingredients.filter((i) => i.supplierId === sup.id);
+
+  // 2. Ingredients from supplier.providedItems
+  const providedIngs: Ingredient[] = [];
+  if (sup.providedItems && sup.providedItems.length > 0) {
+    sup.providedItems.forEach((pItem, pIdx) => {
+      const cleanName = pItem.name?.trim().toLowerCase();
+      const match = ingredients.find(
+        (i) =>
+          (pItem.ingredientId && i.id === pItem.ingredientId) ||
+          (cleanName && i.name.toLowerCase() === cleanName)
+      );
+      if (match) {
+        if (!linkedIngs.some((li) => li.id === match.id) && !providedIngs.some((pi) => pi.id === match.id)) {
+          providedIngs.push(match);
+        }
+      } else if (pItem.name && pItem.name.trim().length > 0) {
+        const virtualId = pItem.ingredientId || `sup_item_${sup.id}_${pIdx}`;
+        if (!providedIngs.some((pi) => pi.id === virtualId)) {
+          providedIngs.push({
+            id: virtualId,
+            name: pItem.name.trim(),
+            sku: pItem.sku || `SKU-${pIdx + 1}`,
+            unit: (pItem.unit as any) || 'kg',
+            currentStock: 0,
+            reorderLevel: 5,
+            averageCostCents: pItem.unitPriceCents || 50000,
+            supplierId: sup.id,
+            active: true,
+          });
+        }
+      }
+    });
+  }
+
+  // Strictly return only items belonging to this supplier (no fallback to other suppliers' items!)
+  return [...linkedIngs, ...providedIngs];
+};
+
 

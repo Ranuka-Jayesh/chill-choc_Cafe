@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/useAuthStore';
 import { BrandFooter } from '@/components/brand/BrandFooter';
@@ -11,31 +11,39 @@ export const PosLoginPage: React.FC = () => {
 
   const [pin, setPin] = useState<string>('');
   const [errorShake, setErrorShake] = useState(false);
+  const isSubmittingRef = useRef(false);
 
   const attemptLogin = useCallback(async (pinCode: string) => {
+    if (isSubmittingRef.current || isLoading) return;
+    isSubmittingRef.current = true;
     try {
       await loginByPin(pinCode, undefined, 'term_01');
-      toast.success('Signed in to POS terminal.');
+      toast.success('Signed in to POS terminal.', { id: 'pos-pin-auth' });
       navigate('/pos');
     } catch (err: any) {
       setErrorShake(true);
       setTimeout(() => setErrorShake(false), 500);
-      toast.error(err.message || 'Invalid PIN code');
+      toast.error(err.message || 'Invalid PIN code', { id: 'pos-pin-auth' });
       setPin('');
+    } finally {
+      isSubmittingRef.current = false;
     }
-  }, [loginByPin, navigate]);
+  }, [loginByPin, isLoading, navigate]);
 
   const handleDigit = useCallback((digit: string) => {
-    if (isLoading) return;
+    if (isLoading || isSubmittingRef.current) return;
     setPin((prev) => {
       if (prev.length >= 4) return prev;
-      const nextPin = prev + digit;
-      if (nextPin.length === 4) {
-        attemptLogin(nextPin);
-      }
-      return nextPin;
+      return prev + digit;
     });
-  }, [isLoading, attemptLogin]);
+  }, [isLoading]);
+
+  // Trigger login exactly once when PIN reaches 4 digits
+  useEffect(() => {
+    if (pin.length === 4 && !isSubmittingRef.current) {
+      attemptLogin(pin);
+    }
+  }, [pin, attemptLogin]);
 
   const handleDelete = useCallback(() => {
     if (isLoading) return;

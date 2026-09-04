@@ -44,11 +44,6 @@ export const AdminDashboardPage: React.FC = () => {
 
   // Real-time Database Subscription
   useEffect(() => {
-    // If database has 0 orders, populate rich demo dummy data automatically
-    if (orderService.getOrders().length === 0) {
-      db.seedDummyData();
-    }
-
     const refreshAll = () => {
       setDailySummary(reportService.getDailyReport());
       setHourlySales(reportService.getHourlySales());
@@ -75,11 +70,6 @@ export const AdminDashboardPage: React.FC = () => {
       unsubDrawer();
     };
   }, []);
-
-  const handleSeedData = () => {
-    db.seedDummyData();
-    toast.success('Sample demo orders, shifts, and expenses loaded successfully!');
-  };
 
   const stockAlerts = useMemo(() => {
     const today = startOfDay(new Date());

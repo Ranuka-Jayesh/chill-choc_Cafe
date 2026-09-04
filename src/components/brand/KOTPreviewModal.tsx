@@ -6,6 +6,7 @@ import { receiptSocketService } from '@/services/receiptSocketService';
 import { formatDateTime } from '@/utils/format';
 import { Printer, X, Utensils } from 'lucide-react';
 import { toast } from 'sonner';
+import { printThermalElement } from '@/utils/printThermal';
 
 interface KOTPreviewModalProps {
   order: Order | null;
@@ -78,7 +79,7 @@ export const KOTPreviewModal: React.FC<KOTPreviewModalProps> = ({ order, isOpen,
   if (!isOpen || !order || typeof document === 'undefined') return null;
 
   const handlePrint = () => {
-    window.print();
+    printThermalElement('printable-kot');
     toast.success(`KOT for ${order.orderNumber} dispatched to kitchen.`);
   };
 

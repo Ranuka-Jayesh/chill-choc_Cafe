@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { useSearchParams } from 'react-router-dom';
-import { inventoryService } from '@/services/inventoryService';
+import { inventoryService, getSupplierAvailableIngredients } from '@/services/inventoryService';
 import { catalogService } from '@/services/catalogService';
 import {
   InventoryMovement,
@@ -114,11 +114,12 @@ export const AdminInventoryPage: React.FC = () => {
   const [suppliers, setSuppliers] = useState<Supplier[]>(catalogService.getSuppliers());
   const [stockRequests, setStockRequests] = useState<StockRequest[]>(inventoryService.getStockRequests());
 
-  // Editing Stock Request Modal State
-  const [editingRequest, setEditingRequest] = useState<StockRequest | null>(null);
-  const [editRequestQty, setEditRequestQty] = useState<string>('');
-  const [editRequestCost, setEditRequestCost] = useState<string>('');
-  const [editRequestExpiry, setEditRequestExpiry] = useState<string>('');
+  // Unified Review & Edit Stock Request Modal State (Image 2/3 Pattern)
+  const [reviewAction, setReviewAction] = useState<'ADD' | 'DEDUCT' | 'EXACT'>('ADD');
+  const [reviewQty, setReviewQty] = useState<number>(1);
+  const [reviewExpiry, setReviewExpiry] = useState<string>('');
+  const [reviewCost, setReviewCost] = useState<string>('');
+  const [reviewReason, setReviewReason] = useState<string>('');
 
   // Search & Filters
   const [search, setSearch] = useState('');
@@ -148,52 +149,10 @@ export const AdminInventoryPage: React.FC = () => {
   const activeSuppliers = useMemo(() => suppliers.filter((s) => s.active !== false), [suppliers]);
 
   // Ingredients available according to selected supplier
-  const availableIngredients = useMemo(() => {
-    if (!selectedSupplierId) return ingredients;
-    const sup = suppliers.find((s) => s.id === selectedSupplierId);
-    if (!sup) return ingredients;
-
-    // 1. Ingredients explicitly mapped with supplierId in catalog
-    const linkedIngs = ingredients.filter((i) => i.supplierId === sup.id);
-
-    // 2. Ingredients configured in supplier.providedItems
-    const providedIngs: Ingredient[] = [];
-    if (sup.providedItems && sup.providedItems.length > 0) {
-      sup.providedItems.forEach((pItem, pIdx) => {
-        const existingIng = ingredients.find(
-          (i) =>
-            (pItem.ingredientId && i.id === pItem.ingredientId) ||
-            i.name.toLowerCase() === pItem.name.toLowerCase()
-        );
-        if (existingIng) {
-          if (
-            !linkedIngs.some((li) => li.id === existingIng.id) &&
-            !providedIngs.some((pi) => pi.id === existingIng.id)
-          ) {
-            providedIngs.push(existingIng);
-          }
-        } else {
-          const virtualId = pItem.ingredientId || `sup_item_${sup.id}_${pIdx}`;
-          if (!providedIngs.some((pi) => pi.id === virtualId)) {
-            providedIngs.push({
-              id: virtualId,
-              name: pItem.name,
-              sku: pItem.sku || `SKU-${pIdx + 1}`,
-              unit: (pItem.unit as any) || 'kg',
-              currentStock: 0,
-              reorderLevel: 5,
-              averageCostCents: pItem.unitPriceCents || 50000,
-              supplierId: sup.id,
-              active: true,
-            });
-          }
-        }
-      });
-    }
-
-    const combined = [...linkedIngs, ...providedIngs];
-    return combined.length > 0 ? combined : ingredients;
-  }, [selectedSupplierId, suppliers, ingredients]);
+  const availableIngredients = useMemo(
+    () => getSupplierAvailableIngredients(selectedSupplierId, suppliers, ingredients),
+    [selectedSupplierId, suppliers, ingredients]
+  );
 
   // Payment Breakdown State in Goods Inward
   const [cashAmount, setCashAmount] = useState<string>('');
@@ -230,6 +189,7 @@ export const AdminInventoryPage: React.FC = () => {
   const [adjustType, setAdjustType] = useState<'ADD' | 'DEDUCT' | 'EXACT'>('ADD');
   const [adjustQuantity, setAdjustQuantity] = useState<number>(1);
   const [adjustReason, setAdjustReason] = useState<string>('');
+  const [adjustExpiry, setAdjustExpiry] = useState<string>('');
 
   const handleRecordSettlementPayment = () => {
     if (!viewingPurchase) return;
@@ -270,6 +230,21 @@ export const AdminInventoryPage: React.FC = () => {
           updated.paymentStatus === 'PAID' ? 'Fully Settled' : 'Partial Paid'
         }`
       );
+    }
+  };
+
+  const handleMarkChequeCleared = (purchaseId: string, chequeNumber?: string) => {
+    const updated = inventoryService.clearPurchaseChequePayment({
+      purchaseId,
+      chequeNumber,
+      clearedDate: new Date().toISOString(),
+    });
+    if (updated) {
+      setViewingPurchase(updated);
+      setPurchases(catalogService.getPurchases());
+      toast.success(`Cheque ${chequeNumber ? `#${chequeNumber}` : ''} successfully marked as Cleared & Paid!`);
+    } else {
+      toast.error('Failed to update cheque status.');
     }
   };
 
@@ -358,40 +333,72 @@ export const AdminInventoryPage: React.FC = () => {
     }
   };
 
-  const handleOpenEditRequestModal = (req: StockRequest) => {
-    setEditingRequest(req);
-    setEditRequestQty(
-      String(req.type === 'STOCK_ADJUSTMENT' ? (req.requestedStock ?? req.currentStock) : req.quantityChange)
-    );
-    setEditRequestCost(req.costCents ? String(req.costCents / 100) : '');
-    setEditRequestExpiry(req.expiryDate || '');
+  const handleOpenRequestModal = (req: StockRequest) => {
+    setViewingRequest(req);
+    const isDelivery = req.type === 'STOCK_DELIVERY';
+    if (isDelivery) {
+      setReviewAction('ADD');
+      setReviewQty(req.quantityChange || 1);
+    } else {
+      if (req.quantityChange > 0) {
+        setReviewAction('ADD');
+        setReviewQty(req.quantityChange);
+      } else if (req.quantityChange < 0) {
+        setReviewAction('DEDUCT');
+        setReviewQty(Math.abs(req.quantityChange));
+      } else {
+        setReviewAction('EXACT');
+        setReviewQty(req.requestedStock ?? req.currentStock);
+      }
+    }
+    const ing = ingredients.find((i) => i.id === req.ingredientId);
+    setReviewExpiry(req.expiryDate || ing?.expiryDate || '');
+    setReviewCost(req.costCents ? String(req.costCents / 100) : '');
+    setReviewReason(req.reason || '');
   };
 
-  const handleSaveAndApproveRequest = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingRequest) return;
-    const parsedQty = parseFloat(editRequestQty);
+  const handleApproveWithEdits = (reqToApprove?: StockRequest) => {
+    const target = reqToApprove || viewingRequest;
+    if (!target) return;
+
+    const parsedQty = reviewQty;
     if (isNaN(parsedQty) || parsedQty < 0) {
       toast.error('Please enter a valid quantity.');
       return;
     }
 
-    const parsedCost = editRequestCost ? Math.round(parseFloat(editRequestCost) * 100) : undefined;
+    const cur = target.currentStock;
+    let finalQty: number;
+    if (target.type === 'STOCK_DELIVERY') {
+      finalQty = reviewQty;
+    } else {
+      if (reviewAction === 'ADD') {
+        finalQty = cur + reviewQty;
+      } else if (reviewAction === 'DEDUCT') {
+        finalQty = Math.max(0, cur - reviewQty);
+      } else {
+        finalQty = reviewQty;
+      }
+    }
+
+    const parsedCost = reviewCost ? Math.round(parseFloat(reviewCost) * 100) : undefined;
     const session = authService.getCurrentSession();
     const adminId = session?.user?.id || 'usr_admin';
     const adminName = session?.user?.name || 'Administrator';
 
     try {
       inventoryService.approveStockRequest({
-        requestId: editingRequest.id,
+        requestId: target.id,
         adminId,
         adminName,
-        modifiedQty: parsedQty,
+        modifiedQty: finalQty,
         modifiedCost: parsedCost,
-        modifiedExpiry: editRequestExpiry || undefined,
+        modifiedExpiry: reviewExpiry || undefined,
       });
-      toast.success(`Modified & approved request for "${editingRequest.ingredientName}".`);
-      setEditingRequest(null);
+      toast.success(
+        `Approved ${target.type === 'STOCK_DELIVERY' ? 'delivery intake' : 'stock adjustment'} for "${target.ingredientName}".`
+      );
+      setViewingRequest(null);
     } catch (err: any) {
       toast.error(err.message || 'Failed to approve request');
     }
@@ -579,14 +586,40 @@ export const AdminInventoryPage: React.FC = () => {
   }, [movements, movementFilter, ingredientFilter, dateRange, search]);
 
   // ---------------------------------------------------------------------------
-  // Filtering Purchases (Purchases Tab)
+  // Filtering Purchases (Purchases Tab) - Rolls forward unpaid POs into next months until paid
   // ---------------------------------------------------------------------------
   const filteredPurchases = useMemo(() => {
     return purchases.filter((p) => {
       if (dateRange.year !== 'ALL') {
         const pDate = new Date(p.purchaseDate);
-        if (String(pDate.getFullYear()) !== dateRange.year) return false;
-        if (dateRange.month !== 'ALL' && String(pDate.getMonth() + 1) !== dateRange.month) return false;
+        const pYear = pDate.getFullYear();
+        const pMonth = pDate.getMonth() + 1;
+        const targetYear = parseInt(dateRange.year, 10);
+        const targetMonth = dateRange.month !== 'ALL' ? parseInt(dateRange.month, 10) : null;
+
+        if (targetMonth === null) {
+          // Whole year selected
+          const isSameYear = pYear === targetYear;
+          const isPriorYearUnpaid = pYear < targetYear && ((p.dueCents ?? 0) > 0 || p.paymentStatus !== 'PAID');
+          if (!isSameYear && !isPriorYearUnpaid) return false;
+        } else {
+          // Specific Year & Month selected (e.g. September 2026)
+          const isCreatedInSelectedMonth = pYear === targetYear && pMonth === targetMonth;
+          const isPriorMonth = pYear < targetYear || (pYear === targetYear && pMonth < targetMonth);
+
+          // 1. Unpaid / partially paid records roll forward into next months until marked paid!
+          const hasOutstandingDue = (p.dueCents ?? 0) > 0 || p.paymentStatus !== 'PAID';
+
+          // 2. Also show if paid during this selected month
+          const wasPaidInSelectedMonth = (p.payments || []).some((pm) => {
+            if (!pm.timestamp) return false;
+            const pmDate = new Date(pm.timestamp);
+            return pmDate.getFullYear() === targetYear && pmDate.getMonth() + 1 === targetMonth;
+          });
+
+          const shouldShow = isCreatedInSelectedMonth || (isPriorMonth && (hasOutstandingDue || wasPaidInSelectedMonth));
+          if (!shouldShow) return false;
+        }
       }
 
       if (search.trim()) {
@@ -701,6 +734,7 @@ export const AdminInventoryPage: React.FC = () => {
   const handleOpenReceiveModal = () => {
     const currentSuppliers = catalogService.getSuppliers();
     setSuppliers(currentSuppliers);
+    setIngredients(inventoryService.getIngredients());
     setSelectedSupplierId('');
     setVendorName('');
     setInvoiceNumber(`INV-${Date.now().toString().slice(-4)}`);
@@ -721,10 +755,14 @@ export const AdminInventoryPage: React.FC = () => {
   };
 
   const handleAddPurchaseItem = () => {
-    const list = availableIngredients.length > 0 ? availableIngredients : ingredients;
+    const list = availableIngredients;
     const first = list[0];
     if (!first) {
-      toast.error('No ingredients available to purchase for this supplier.');
+      toast.error(
+        selectedSupplierId
+          ? 'No items registered for this supplier. Please configure supplied items in Suppliers & Payables.'
+          : 'No ingredients available.'
+      );
       return;
     }
     const newItemTotalCents = first.averageCostCents || 50000;
@@ -869,9 +907,13 @@ export const AdminInventoryPage: React.FC = () => {
     if (preselectedIngId) {
       setAdjustIngredientId(preselectedIngId);
       setIsSpecificIngredientAdjust(true);
+      const ing = ingredients.find((i) => i.id === preselectedIngId);
+      setAdjustExpiry(ing?.expiryDate || '');
     } else {
-      setAdjustIngredientId(ingredients[0] ? ingredients[0].id : '');
+      const first = ingredients[0];
+      setAdjustIngredientId(first ? first.id : '');
       setIsSpecificIngredientAdjust(false);
+      setAdjustExpiry(first?.expiryDate || '');
     }
     setAdjustType('ADD');
     setAdjustQuantity(1);
@@ -896,12 +938,15 @@ export const AdminInventoryPage: React.FC = () => {
       calculatedNewStock = Math.max(0, Number(Number(adjustQuantity).toFixed(2)));
     }
 
+    const finalExpiry = adjustExpiry.trim() || targetIng.expiryDate;
+
     inventoryService.adjustStock({
       ingredientId: targetIng.id,
       newStock: calculatedNewStock,
       reason: adjustReason.trim() || 'Manual stock adjustment',
       userId: 'usr_admin',
       userName: 'Admin Manager',
+      expiryDate: finalExpiry || undefined,
     });
 
     toast.success(`Updated "${targetIng.name}" stock to ${calculatedNewStock} ${targetIng.unit}.`);
@@ -974,7 +1019,7 @@ export const AdminInventoryPage: React.FC = () => {
                 activeTab === 'purchases' ? 'bg-white/20 text-white' : 'bg-cream-100 text-brand-brown-dark'
               }`}
             >
-              {purchases.length}
+              {filteredPurchases.length}
             </span>
           </button>
 
@@ -1085,137 +1130,107 @@ export const AdminInventoryPage: React.FC = () => {
         </div>
       </div>
 
-      {/* PENDING CASHIER STOCK REQUESTS REVIEW BANNER */}
+      {/* PENDING STAFF STOCK REQUESTS (IMAGE 2 TABLE DESIGN PATTERN) */}
       {pendingStockRequests.length > 0 && activeTab !== 'requests' && (
-        <div className="bg-amber-50/90 border border-amber-300/90 rounded-2xl p-3.5 sm:p-4 shadow-xs shrink-0 animate-in fade-in slide-in-from-top-2">
-          <div className="flex items-center justify-between gap-3 mb-2.5">
+        <div className="bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-2 shrink-0 animate-in fade-in slide-in-from-top-1">
+          {/* Table Header Strip */}
+          <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50/50 border-b border-[#EAE3DA]">
             <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping" />
-              <span className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+              <span className="text-xs font-black text-brand-brown-deep tracking-wider uppercase flex items-center gap-1.5">
                 <Clock className="w-3.5 h-3.5 text-amber-700" />
                 <span>Pending Staff Stock Requests ({pendingStockRequests.length} waiting authorization)</span>
               </span>
             </div>
-            <span className="text-[10px] font-bold text-amber-800 hidden sm:inline">
-              Cashiers submitted stock intakes or audit adjustments requiring your review
-            </span>
+            <button
+              type="button"
+              onClick={() => setSearchParams({ tab: 'requests' })}
+              className="text-[11px] font-bold text-amber-800 hover:text-amber-950 hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <span>Manage all in Requests tab</span>
+              <span>→</span>
+            </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 max-h-56 overflow-y-auto pr-1">
-            {pendingStockRequests.map((req) => (
-              <div
-                key={req.id}
-                className="bg-white rounded-xl border border-amber-200/90 p-3 shadow-2xs flex flex-col justify-between gap-2.5 hover:border-amber-400 transition-all"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase border ${
-                        req.type === 'STOCK_DELIVERY'
-                          ? 'bg-amber-50 text-amber-900 border-amber-300'
-                          : 'bg-teal-50 text-brand-teal-dark border-teal-200'
-                      }`}
-                    >
-                      {req.type === 'STOCK_DELIVERY' ? 'Goods Delivery' : 'Stock Adjustment'}
-                    </span>
-                    <span className="text-[10px] text-text-muted font-bold">
-                      {format(new Date(req.createdAt), 'hh:mm a')}
-                    </span>
-                  </div>
-
-                  <div className="text-xs font-black text-brand-brown-deep">
-                    {req.ingredientName}
-                  </div>
-
-                  <div className="text-[11px] font-bold text-brand-teal flex items-center gap-1.5 flex-wrap">
-                    {req.type === 'STOCK_ADJUSTMENT' ? (
-                      <span>
-                        Current:{' '}
-                        <span className="text-text-muted font-normal">
-                          {req.currentStock} {req.unit}
-                        </span>{' '}
-                        → Requested:{' '}
-                        <span className="text-brand-brown-deep font-black">
-                          {req.requestedStock} {req.unit}
-                        </span>{' '}
-                        <span className={req.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'}>
-                          ({req.quantityChange >= 0 ? `+${req.quantityChange}` : req.quantityChange} {req.unit})
-                        </span>
+          {/* Table matching Image 2 design */}
+          <div className="overflow-x-auto max-h-56 overflow-y-auto">
+            <table className="w-full text-left text-xs border-collapse">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-2xs">
+                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
+                  <th className="py-2.5 px-3.5 bg-[#FAF7F2]/95">Type</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Raw Ingredient</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Submitted By & Note</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Current Stock</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Requested Stock</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Time</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#F0EAE2]">
+                {pendingStockRequests.map((req) => (
+                  <tr
+                    key={req.id}
+                    onClick={() => handleOpenRequestModal(req)}
+                    className="hover:bg-[#FAF7F2]/80 transition-colors group cursor-pointer"
+                    title="Click to view and authorize request"
+                  >
+                    {/* Type Badge */}
+                    <td className="py-2.5 px-3.5">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border shadow-2xs ${
+                          req.type === 'STOCK_DELIVERY'
+                            ? 'bg-amber-50 text-amber-900 border-amber-300'
+                            : 'bg-teal-50 text-brand-teal-dark border-teal-200'
+                        }`}
+                      >
+                        {req.type === 'STOCK_DELIVERY' ? 'Goods Delivery' : 'Stock Adjustment'}
                       </span>
-                    ) : req.items && req.items.length > 0 ? (
-                      <div className="space-y-1 w-full">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-status-success font-black">
-                            {req.items.length} Received Line Items
-                          </span>
-                          <span className="font-mono font-black text-brand-brown-deep">
-                            {formatLKR(req.totalCents || req.costCents || 0)}
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-text-muted font-medium bg-amber-50/60 p-1.5 rounded-lg border border-amber-200/50 space-y-0.5">
-                          {req.items.slice(0, 3).map((it, i) => (
-                            <div key={i} className="flex justify-between">
-                              <span className="truncate max-w-[180px]">• {it.ingredientName}</span>
-                              <span className="font-mono font-bold">{it.quantity} {it.unit}</span>
-                            </div>
-                          ))}
-                          {req.items.length > 3 && (
-                            <div className="text-[9px] text-brand-teal font-bold pt-0.5">
-                              +{req.items.length - 3} more items...
-                            </div>
-                          )}
-                        </div>
+                    </td>
+
+                    {/* Ingredient Name */}
+                    <td className="py-2.5 px-3 font-black text-brand-brown-dark text-xs">
+                      {req.ingredientName}
+                    </td>
+
+                    {/* Submitted by & Reason */}
+                    <td className="py-2.5 px-3">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="font-bold text-brand-brown-dark text-xs">{req.requestedByUserName}:</span>
+                        <span className="text-text-muted text-[11px] truncate max-w-xs">{req.reason}</span>
                       </div>
-                    ) : (
-                      <span>
-                        Intake Quantity:{' '}
-                        <span className="text-status-success font-black">
+                    </td>
+
+                    {/* Current Stock */}
+                    <td className="py-2.5 px-3 text-center font-bold text-xs tabular-nums text-text-secondary">
+                      {req.currentStock} {req.unit}
+                    </td>
+
+                    {/* Requested Stock + Delta */}
+                    <td className="py-2.5 px-3 text-center tabular-nums">
+                      {req.type === 'STOCK_ADJUSTMENT' ? (
+                        <div className="inline-flex items-center gap-1.5 text-xs font-black text-brand-brown-deep">
+                          <span>{req.requestedStock} {req.unit}</span>
+                          <span className={`text-[11px] font-bold ${req.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'}`}>
+                            ({req.quantityChange >= 0 ? `+${req.quantityChange}` : req.quantityChange}{req.unit})
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-xs font-black text-status-success">
                           +{req.quantityChange} {req.unit}
                         </span>
-                        {req.costCents ? ` • Cost: ${formatLKR(req.costCents)}` : ''}
-                      </span>
-                    )}
-                  </div>
+                      )}
+                    </td>
 
-                  <div className="text-[10px] text-text-secondary bg-cream-50 p-1.5 rounded-lg border border-border/60">
-                    <span className="font-bold text-brand-brown-dark">{req.requestedByUserName}:</span> {req.reason}
-                    {req.supplierName && <span> • Supplier: {req.supplierName}</span>}
-                    {req.invoiceNumber && <span> (Inv: {req.invoiceNumber})</span>}
-                    {req.paymentStatus && (
-                      <span className="ml-1.5 px-1.5 py-0.5 rounded bg-white border border-border text-[9px] font-black uppercase text-brand-brown-dark">
-                        {req.paymentStatus === 'PAID' ? 'Fully Paid' : req.paymentStatus === 'PARTIAL' ? 'Partial' : 'Credit / Unpaid'}
+                    {/* Time Pill matching Image 2 */}
+                    <td className="py-2.5 px-3 text-center">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono font-bold text-[11px] bg-cream-100/70 text-brand-brown border border-[#E0D7CC]">
+                        <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                        <span>{format(new Date(req.createdAt), 'hh:mm a')}</span>
                       </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="pt-2 border-t border-amber-100 flex items-center justify-end gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleRejectStockRequest(req)}
-                    className="px-2.5 py-1 rounded-lg border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-bold transition-all cursor-pointer"
-                  >
-                    Reject
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleOpenEditRequestModal(req)}
-                    className="px-2.5 py-1 rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-bold transition-all cursor-pointer flex items-center gap-1"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                    <span>Edit & Approve</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApproveStockRequest(req)}
-                    className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-black shadow-2xs transition-all active:scale-95 cursor-pointer flex items-center gap-1"
-                  >
-                    <Check className="w-3 h-3" />
-                    <span>Approve</span>
-                  </button>
-                </div>
-              </div>
-            ))}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -1492,8 +1507,18 @@ export const AdminInventoryPage: React.FC = () => {
                           {p.supplierName}
                         </td>
                         <td className="py-2.5 px-3 text-text-secondary text-xs whitespace-nowrap">
-                          <div className="font-medium leading-tight">
-                            {new Date(p.purchaseDate).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
+                          <div className="font-medium leading-tight flex items-center gap-1.5">
+                            <span>{new Date(p.purchaseDate).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}</span>
+                            {dateRange.month !== 'ALL' &&
+                              (new Date(p.purchaseDate).getMonth() + 1 !== parseInt(dateRange.month, 10) ||
+                                new Date(p.purchaseDate).getFullYear() !== parseInt(dateRange.year, 10)) && (
+                                <span
+                                  className="px-1.5 py-0.2 rounded text-[9px] font-black uppercase bg-amber-50 text-amber-900 border border-amber-300"
+                                  title="Unpaid balance carried forward from earlier month"
+                                >
+                                  Rolled Over
+                                </span>
+                              )}
                           </div>
                           <div className="text-[10px] text-text-muted font-mono">
                             {new Date(p.purchaseDate).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
@@ -1513,53 +1538,84 @@ export const AdminInventoryPage: React.FC = () => {
                           </div>
                           {effectiveDueCents > 0 && (
                             <div className="text-[11px] font-bold text-rose-600">
-                              Due: {formatLKR(effectiveDueCents)}
+                              {(p.payments || []).some((pm) => pm.method === 'CHEQUE' && pm.chequeStatus !== 'CLEARED') ? (
+                                <span className="text-amber-800">Pending Chq: {formatLKR(effectiveDueCents)}</span>
+                              ) : (
+                                <span>Due: {formatLKR(effectiveDueCents)}</span>
+                              )}
                             </div>
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                          {isPaid ? (
-                            <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full font-black text-[10px] uppercase border bg-emerald-50 text-status-success border-emerald-200/70 shadow-2xs">
-                              <Check className="w-3 h-3 text-status-success" />
-                              <span>Paid</span>
-                            </span>
-                          ) : daysDiff !== null && daysDiff < 0 ? (
-                            <div className="flex flex-col items-center gap-0.5">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border bg-rose-100 text-rose-800 border-rose-300 shadow-2xs">
-                                <AlertTriangle className="w-3 h-3 text-rose-600 shrink-0" />
-                                <span>Overdue {Math.abs(daysDiff)}d</span>
-                              </span>
-                              {targetDate && (
-                                <span className="text-[10px] font-bold text-rose-700 font-mono">
-                                  {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                          {(() => {
+                            const pendingChq = (p.payments || []).find((pm) => pm.method === 'CHEQUE' && pm.chequeStatus !== 'CLEARED');
+                            if (pendingChq) {
+                              return (
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border bg-amber-50 text-amber-900 border-amber-300 shadow-2xs">
+                                    <Landmark className="w-3 h-3 text-amber-700 shrink-0" />
+                                    <span>Cheque Pending</span>
+                                  </span>
+                                  {pendingChq.chequeDate && (
+                                    <span className="text-[10px] font-bold text-amber-800 font-mono">
+                                      Due {new Date(pendingChq.chequeDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            if (isPaid) {
+                              return (
+                                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full font-black text-[10px] uppercase border bg-emerald-50 text-status-success border-emerald-200/70 shadow-2xs">
+                                  <Check className="w-3 h-3 text-status-success" />
+                                  <span>Paid</span>
                                 </span>
-                              )}
-                            </div>
-                          ) : daysDiff !== null && daysDiff <= 3 ? (
-                            <div className="flex flex-col items-center gap-0.5">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border bg-amber-100 text-amber-900 border-amber-300 shadow-2xs animate-pulse">
-                                <Clock className="w-3 h-3 text-amber-700 shrink-0" />
-                                <span>{daysDiff === 0 ? 'Due Today' : `Due in ${daysDiff}d`}</span>
-                              </span>
-                              {targetDate && (
-                                <span className="text-[10px] font-bold text-amber-800 font-mono">
-                                  {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                              );
+                            }
+                            if (daysDiff !== null && daysDiff < 0) {
+                              return (
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border bg-rose-100 text-rose-800 border-rose-300 shadow-2xs">
+                                    <AlertTriangle className="w-3 h-3 text-rose-600 shrink-0" />
+                                    <span>Overdue {Math.abs(daysDiff)}d</span>
+                                  </span>
+                                  {targetDate && (
+                                    <span className="text-[10px] font-bold text-rose-700 font-mono">
+                                      {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            if (daysDiff !== null && daysDiff <= 3) {
+                              return (
+                                <div className="flex flex-col items-center gap-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border bg-amber-100 text-amber-900 border-amber-300 shadow-2xs animate-pulse">
+                                    <Clock className="w-3 h-3 text-amber-700 shrink-0" />
+                                    <span>{daysDiff === 0 ? 'Due Today' : `Due in ${daysDiff}d`}</span>
+                                  </span>
+                                  {targetDate && (
+                                    <span className="text-[10px] font-bold text-amber-800 font-mono">
+                                      {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return (
+                              <div className="flex flex-col items-center gap-0.5">
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-extrabold text-[10px] uppercase border bg-rose-50 text-rose-700 border-rose-200 shadow-2xs">
+                                  <Clock className="w-3 h-3 text-rose-500 shrink-0" />
+                                  <span>Due in {daysDiff}d</span>
                                 </span>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="flex flex-col items-center gap-0.5">
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-extrabold text-[10px] uppercase border bg-rose-50 text-rose-700 border-rose-200 shadow-2xs">
-                                <Clock className="w-3 h-3 text-rose-500 shrink-0" />
-                                <span>Due in {daysDiff}d</span>
-                              </span>
-                              {targetDate && (
-                                <span className="text-[10px] font-medium text-text-muted font-mono">
-                                  {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                                </span>
-                              )}
-                            </div>
-                          )}
+                                {targetDate && (
+                                  <span className="text-[10px] font-medium text-text-muted font-mono">
+                                    {targetDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -1576,30 +1632,27 @@ export const AdminInventoryPage: React.FC = () => {
         </div>
       )}
 
-      {/* 4. TAB 4: CASHIER REQUESTS TABLE */}
+      {/* 4. TAB 4: CASHIER REQUESTS TABLE (COMPACT & RESPONSIVE - IMAGE 2 PATTERN) */}
       {activeTab === 'requests' && (
         <div className="flex-1 min-h-0 bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-1">
           <div className="flex-1 overflow-auto min-h-0 pb-24">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-xs">
+            <table className="w-full text-left text-xs border-collapse min-w-[780px]">
+              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-2xs">
                 <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
-                  <th className="py-3 px-3.5 bg-[#FAF7F2]/95">Request #</th>
-                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Timestamp</th>
-                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Staff / Cashier</th>
-                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Type</th>
-                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Ingredient / Items</th>
-                  <th className="py-3 px-3 bg-[#FAF7F2]/95">Quantity / Valuation</th>
-                  <th className="py-3 px-3.5 bg-[#FAF7F2]/95">Justification & Notes</th>
-                  <th className="py-3 px-3 text-center bg-[#FAF7F2]/95">Status</th>
-                  <th className="py-3 px-3.5 text-right bg-[#FAF7F2]/95">Actions</th>
+                  <th className="py-2.5 px-3.5 bg-[#FAF7F2]/95">Request / Date</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Type</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Ingredient / Items</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Staff & Reason</th>
+                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Quantity</th>
+                  <th className="py-2.5 px-3 text-center bg-[#FAF7F2]/95">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#F2ECE4] font-medium">
+              <tbody className="divide-y divide-[#F0EAE2]">
                 {filteredRequests.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="text-center py-20 text-text-muted">
-                      <Truck className="w-9 h-9 mx-auto mb-2 text-text-muted/40" />
-                      <div className="font-semibold text-xs text-text-secondary">No cashier stock requests found.</div>
+                    <td colSpan={6} className="text-center py-16 text-text-muted">
+                      <Truck className="w-8 h-8 mx-auto mb-1.5 text-text-muted/40" />
+                      <div className="font-bold text-xs text-brand-brown-dark">No cashier stock requests found.</div>
                     </td>
                   </tr>
                 ) : (
@@ -1612,51 +1665,91 @@ export const AdminInventoryPage: React.FC = () => {
                     return (
                       <tr
                         key={req.id}
-                        onClick={() => setViewingRequest(req)}
-                        className={`hover:bg-[#FAF7F2]/90 transition-colors cursor-pointer group ${
-                          isPending ? 'bg-amber-50/40' : ''
+                        onClick={() => handleOpenRequestModal(req)}
+                        className={`hover:bg-[#FAF7F2]/80 transition-colors cursor-pointer group ${
+                          isPending ? 'bg-amber-50/30' : ''
                         }`}
+                        title="Click to view details and review"
                       >
-                        <td className="py-3 px-3.5 font-mono font-bold text-brand-teal group-hover:underline">
-                          {req.requestNumber}
+                        {/* 1. Request Number & Timestamp Combined */}
+                        <td className="py-2.5 px-3.5">
+                          <div className="font-mono font-bold text-xs text-brand-teal group-hover:underline">
+                            {req.requestNumber}
+                          </div>
+                          <div className="text-[10px] text-text-muted font-mono whitespace-nowrap">
+                            {format(new Date(req.createdAt), 'dd MMM, hh:mm a')}
+                          </div>
                         </td>
-                        <td className="py-3 px-3 text-text-secondary whitespace-nowrap">
-                          {format(new Date(req.createdAt), 'dd MMM yyyy, hh:mm a')}
-                        </td>
-                        <td className="py-3 px-3 font-bold text-brand-brown-dark">
-                          {req.requestedByUserName}
-                        </td>
-                        <td className="py-3 px-3">
+
+                        {/* 2. Type Badge */}
+                        <td className="py-2.5 px-3">
                           <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase border ${
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full font-black text-[9px] uppercase border shadow-2xs ${
                               isDelivery
                                 ? 'bg-amber-50 text-amber-900 border-amber-300'
                                 : 'bg-teal-50 text-brand-teal-dark border-teal-200'
                             }`}
                           >
-                            {isDelivery ? 'Goods Delivery' : 'Adjustment'}
+                            {isDelivery ? 'Delivery' : 'Adjustment'}
                           </span>
                         </td>
-                        <td className="py-3 px-3 font-black text-brand-brown-deep">
+
+                        {/* 3. Ingredient / Items */}
+                        <td className="py-2.5 px-3 font-black text-brand-brown-dark text-xs">
                           {isDelivery && req.items && req.items.length > 0 ? (
-                            <div>
-                              <div>{req.items.length} Line Items</div>
-                              <div className="text-[10px] font-normal text-text-muted truncate max-w-[180px]">
-                                {req.items.map((i) => i.ingredientName).join(', ')}
+                            req.items.length === 1 ? (
+                              <span className="truncate max-w-[190px] block font-bold text-xs">{req.items[0].ingredientName}</span>
+                            ) : (
+                              <div>
+                                <div className="font-bold text-brand-brown-dark text-xs flex items-center gap-1.5">
+                                  <span>{req.items[0].ingredientName}</span>
+                                  <span className="text-[10px] font-extrabold px-1.5 py-0.2 rounded-full bg-cream-100 text-brand-teal border border-teal-200/60">
+                                    +{req.items.length - 1} more
+                                  </span>
+                                </div>
+                                <div className="text-[10px] font-normal text-text-muted truncate max-w-[170px]" title={req.items.map((i) => i.ingredientName).join(', ')}>
+                                  {req.items.map((i) => i.ingredientName).join(', ')}
+                                </div>
                               </div>
-                            </div>
+                            )
                           ) : (
-                            req.ingredientName
+                            <span className="truncate max-w-[190px] block font-bold text-xs">{req.ingredientName}</span>
                           )}
                         </td>
-                        <td className="py-3 px-3 font-black tabular-nums">
+
+                        {/* 4. Staff & Reason */}
+                        <td className="py-2.5 px-3">
+                          <div className="max-w-[220px]">
+                            <span className="font-bold text-brand-brown-dark text-xs">{req.requestedByUserName}: </span>
+                            <span className="text-text-muted text-[11px] truncate">
+                              {req.reason.replace(/\(1 lines from /gi, '(1 item from ').replace(/\((\d+) lines from /gi, '($1 items from ')}
+                            </span>
+                          </div>
+                          {req.supplierName && (
+                            <div className="text-[10px] text-text-muted font-mono mt-0.5">
+                              {req.supplierName} • {req.invoiceNumber || 'No Inv'}
+                            </div>
+                          )}
+                          {req.rejectionReason && (
+                            <div className="text-[10px] text-rose-600 font-bold mt-0.5">
+                              Declined: {req.rejectionReason}
+                            </div>
+                          )}
+                        </td>
+
+                        {/* 5. Quantity / Valuation */}
+                        <td className="py-2.5 px-3 text-center font-black text-xs tabular-nums">
                           {req.type === 'STOCK_ADJUSTMENT' ? (
-                            <span>
-                              {req.requestedStock} {req.unit}{' '}
-                              <span className="text-[10px] font-bold text-text-muted">
+                            <div>
+                              <span>{req.requestedStock} {req.unit}</span>{' '}
+                              <span
+                                className={`text-[10px] font-bold ${
+                                  req.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'
+                                }`}
+                              >
                                 ({req.quantityChange >= 0 ? `+${req.quantityChange}` : req.quantityChange} {req.unit})
                               </span>
-                            </span>
+                            </div>
                           ) : (
                             <div>
                               <span className="text-status-success font-black">
@@ -1670,81 +1763,27 @@ export const AdminInventoryPage: React.FC = () => {
                             </div>
                           )}
                         </td>
-                        <td className="py-3 px-3.5 text-text-secondary max-w-xs">
-                          <div className="truncate font-medium">{req.reason}</div>
-                          {req.supplierName && (
-                            <div className="text-[10px] text-text-muted">
-                              Supplier: {req.supplierName} • Inv: {req.invoiceNumber || 'N/A'}
-                            </div>
-                          )}
-                          {req.rejectionReason && (
-                            <div className="text-[10px] text-rose-600 font-bold mt-0.5">
-                              Reason: {req.rejectionReason}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3 text-center">
+
+                        {/* 6. Status Badge */}
+                        <td className="py-2.5 px-3 text-center">
                           {isPending && (
-                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-amber-100 text-amber-800 border border-amber-300 inline-flex items-center gap-1.5 animate-pulse">
-                              <Clock className="w-3 h-3 text-amber-700" />
-                              <span>Waiting Review</span>
+                            <span className="px-2 py-0.5 rounded-full font-black text-[9px] uppercase bg-amber-50 text-amber-900 border border-amber-300 inline-flex items-center gap-1 shadow-2xs animate-pulse">
+                              <Clock className="w-2.5 h-2.5 text-amber-700" />
+                              <span>Waiting</span>
                             </span>
                           )}
                           {isApproved && (
-                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-teal-50 text-brand-teal-dark border border-teal-200 inline-flex items-center gap-1.5">
-                              <CheckCircle2 className="w-3 h-3 text-status-success" />
+                            <span className="px-2 py-0.5 rounded-full font-black text-[9px] uppercase bg-status-success-bg text-status-success border border-status-success/30 inline-flex items-center gap-1 shadow-2xs">
+                              <Check className="w-2.5 h-2.5" />
                               <span>Approved</span>
                             </span>
                           )}
                           {isRejected && (
-                            <span className="px-2.5 py-1 rounded-full font-black text-[10px] uppercase bg-rose-50 text-rose-700 border border-rose-200 inline-flex items-center gap-1.5">
-                              <XCircle className="w-3 h-3 text-rose-600" />
+                            <span className="px-2 py-0.5 rounded-full font-black text-[9px] uppercase bg-rose-50 text-rose-700 border border-rose-200 inline-flex items-center gap-1 shadow-2xs">
+                              <XCircle className="w-2.5 h-2.5" />
                               <span>Rejected</span>
                             </span>
                           )}
-                        </td>
-                        <td className="py-3 px-3.5 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setViewingRequest(req);
-                              }}
-                              className="px-2.5 py-1 rounded-full bg-cream-50 hover:bg-cream-200 border border-[#E0D7CC] text-brand-brown-dark font-bold text-xs inline-flex items-center gap-1 transition-all active:scale-95 cursor-pointer"
-                            >
-                              <Eye className="w-3.5 h-3.5 text-brand-teal" />
-                              <span>View</span>
-                            </button>
-
-                            {isPending && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleRejectStockRequest(req);
-                                  }}
-                                  className="px-2.5 py-1 rounded-full bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 font-bold text-xs transition-all active:scale-95 cursor-pointer"
-                                  title="Reject Request"
-                                >
-                                  Reject
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleApproveStockRequest(req);
-                                  }}
-                                  className="px-3 py-1 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs shadow-xs transition-all active:scale-95 cursor-pointer inline-flex items-center gap-1"
-                                  title="Approve and update stock"
-                                >
-                                  <Check className="w-3.5 h-3.5" />
-                                  <span>Approve</span>
-                                </button>
-                              </>
-                            )}
-                          </div>
                         </td>
                       </tr>
                     );
@@ -1752,7 +1791,7 @@ export const AdminInventoryPage: React.FC = () => {
                 )}
                 {filteredRequests.length > 0 && (
                   <tr aria-hidden="true" className="border-0 pointer-events-none select-none">
-                    <td colSpan={9} className="h-20 bg-transparent border-0" />
+                    <td colSpan={7} className="h-20 bg-transparent border-0" />
                   </tr>
                 )}
               </tbody>
@@ -2052,6 +2091,26 @@ export const AdminInventoryPage: React.FC = () => {
                           setSelectedSupplierId(supId);
                           const sup = suppliers.find((s) => s.id === supId);
                           setVendorName(sup ? sup.name : '');
+                          const newAvail = getSupplierAvailableIngredients(supId, suppliers, ingredients);
+                          setPurchaseItems((prev) => {
+                            if (prev.length === 0) return prev;
+                            if (newAvail.length === 0) return [];
+                            return prev.map((item) => {
+                              const isValid = newAvail.some((ing) => ing.id === item.ingredientId);
+                              if (!isValid) {
+                                const first = newAvail[0];
+                                return {
+                                  ...item,
+                                  ingredientId: first.id,
+                                  ingredientName: first.name,
+                                  unit: first.unit,
+                                  unitPriceCents: first.averageCostCents || 50000,
+                                  totalCents: Math.round(item.quantity * (first.averageCostCents || 50000)),
+                                };
+                              }
+                              return item;
+                            });
+                          });
                         }}
                         required
                         className="w-full p-2 bg-[#FAF7F2] border border-[#E2D8CC] rounded-xl text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal cursor-pointer transition-colors"
@@ -2183,11 +2242,17 @@ export const AdminInventoryPage: React.FC = () => {
                                   onChange={(e) => handleUpdatePurchaseItem(idx, { ingredientId: e.target.value })}
                                   className="w-full p-2 bg-[#FAF7F2] border border-[#E2D8CC] rounded-xl text-xs font-bold text-brand-brown-dark outline-none focus:border-brand-teal focus:bg-white cursor-pointer transition-colors"
                                 >
-                                  {availableIngredients.map((ing) => (
-                                    <option key={ing.id} value={ing.id}>
-                                      {ing.name} ({ing.unit})
+                                  {availableIngredients.length === 0 ? (
+                                    <option value="" disabled>
+                                      -- No items registered for this supplier --
                                     </option>
-                                  ))}
+                                  ) : (
+                                    availableIngredients.map((ing) => (
+                                      <option key={ing.id} value={ing.id}>
+                                        {ing.name} ({ing.unit})
+                                      </option>
+                                    ))
+                                  )}
                                 </select>
                               </td>
 
@@ -2620,7 +2685,11 @@ export const AdminInventoryPage: React.FC = () => {
                     ) : (
                       <select
                         value={adjustIngredientId}
-                        onChange={(e) => setAdjustIngredientId(e.target.value)}
+                        onChange={(e) => {
+                          setAdjustIngredientId(e.target.value);
+                          const chosen = ingredients.find((i) => i.id === e.target.value);
+                          setAdjustExpiry(chosen?.expiryDate || '');
+                        }}
                         className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
                         required
                       >
@@ -2703,6 +2772,28 @@ export const AdminInventoryPage: React.FC = () => {
                         <Plus className="w-4 h-4" />
                       </button>
                     </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block">
+                        Expiry Date (Optional)
+                      </label>
+                      {selectedAdjustIng?.expiryDate && (
+                        <span className="text-[10px] text-brand-teal font-mono font-bold">
+                          Current: {selectedAdjustIng.expiryDate}
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="date"
+                      value={adjustExpiry}
+                      onChange={(e) => setAdjustExpiry(e.target.value)}
+                      className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-mono font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer"
+                    />
+                    <p className="text-[10px] text-text-muted mt-1">
+                      Optional. If left blank, will keep current expiry date ({selectedAdjustIng?.expiryDate || 'None'}).
+                    </p>
                   </div>
 
                   <div>
@@ -3131,6 +3222,17 @@ export const AdminInventoryPage: React.FC = () => {
                                         #{p.chequeNumber}
                                       </span>
                                     )}
+                                    {p.method === 'CHEQUE' && (
+                                      p.chequeStatus === 'CLEARED' ? (
+                                        <span className="text-[9px] font-black uppercase text-emerald-800 bg-emerald-100 border border-emerald-300 px-1.5 py-0.2 rounded-full">
+                                          Cleared
+                                        </span>
+                                      ) : (
+                                        <span className="text-[9px] font-black uppercase text-amber-900 bg-amber-100 border border-amber-300 px-1.5 py-0.2 rounded-full">
+                                          Pending
+                                        </span>
+                                      )
+                                    )}
                                   </div>
                                   <div className="text-[10px] text-text-muted font-mono mt-0.5">
                                     {dateStr} • {timeStr}
@@ -3149,12 +3251,26 @@ export const AdminInventoryPage: React.FC = () => {
 
                     {/* Cheque Realization Details if Cheque > 0 */}
                     {chequePayment && (
-                      <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200/80 space-y-2 shrink-0 animate-in fade-in">
-                        <div className="flex items-center gap-1.5 text-xs font-black text-amber-900">
-                          <Landmark className="w-3.5 h-3.5 text-amber-700" />
-                          <span>Cheque Realization Details</span>
+                      <div className="p-3.5 rounded-2xl bg-amber-50/80 border border-amber-300 space-y-2.5 shrink-0 animate-in fade-in">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-1.5 text-xs font-black text-amber-950">
+                            <Landmark className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Cheque Realization Details</span>
+                          </div>
+                          {chequePayment.chequeStatus === 'CLEARED' ? (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase bg-emerald-100 text-status-success border border-emerald-300 inline-flex items-center gap-1 shadow-2xs">
+                              <Check className="w-2.5 h-2.5" />
+                              <span>Cleared</span>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase bg-amber-200/80 text-amber-900 border border-amber-400 inline-flex items-center gap-1 shadow-2xs">
+                              <Clock className="w-2.5 h-2.5 text-amber-800" />
+                              <span>Pending Clearance</span>
+                            </span>
+                          )}
                         </div>
-                        <div className="space-y-1 text-xs">
+
+                        <div className="space-y-1.5 text-xs">
                           <div className="flex justify-between items-center">
                             <span className="text-[10px] text-text-secondary uppercase font-bold">Cheque Ref:</span>
                             <span className="font-mono font-bold text-brand-brown-dark">{chequePayment.chequeNumber || 'N/A'}</span>
@@ -3163,13 +3279,42 @@ export const AdminInventoryPage: React.FC = () => {
                             <span className="text-[10px] text-text-secondary uppercase font-bold">Bank Name:</span>
                             <span className="font-bold text-brand-brown-dark">{chequePayment.bankName || 'N/A'}</span>
                           </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-[10px] text-text-secondary uppercase font-bold">Cheque Amount:</span>
+                            <span className="font-mono font-black text-brand-brown-dark">{formatLKR(chequePayment.amountCents)}</span>
+                          </div>
                           {chequePayment.chequeDate && (
                             <div className="flex justify-between items-center">
-                              <span className="text-[10px] text-text-secondary uppercase font-bold">Realization Date:</span>
-                              <span className="font-bold text-amber-900">{chequePayment.chequeDate}</span>
+                              <span className="text-[10px] text-text-secondary uppercase font-bold">Maturity / Due Date:</span>
+                              <span className="font-bold text-amber-900 font-mono">{chequePayment.chequeDate}</span>
+                            </div>
+                          )}
+                          {chequePayment.clearedAt && (
+                            <div className="flex justify-between items-center pt-1 border-t border-amber-200/70 text-emerald-800">
+                              <span className="text-[10px] uppercase font-bold">Cleared Date:</span>
+                              <span className="font-mono font-bold">
+                                {new Date(chequePayment.clearedAt).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}
+                              </span>
                             </div>
                           )}
                         </div>
+
+                        {/* Action Button: Mark Cheque as Paid / Cleared */}
+                        {chequePayment.chequeStatus !== 'CLEARED' && (
+                          <div className="pt-2 border-t border-amber-200/80">
+                            <button
+                              type="button"
+                              onClick={() => handleMarkChequeCleared(viewingPurchase.id, chequePayment.chequeNumber)}
+                              className="w-full py-2 px-3 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-extrabold text-xs shadow-xs transition-all active:scale-98 flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>Mark Cheque as Paid / Cleared</span>
+                            </button>
+                            <p className="text-[9px] text-amber-800 mt-1 text-center font-medium">
+                              Click when supplier informs or bank debits money
+                            </p>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -3248,30 +3393,24 @@ export const AdminInventoryPage: React.FC = () => {
       })()}
 
       {/* ========================================================================= */}
-      {/* 10. MODAL: VIEW CASHIER STOCK REQUEST DETAILS (3-COLUMN STUDIO CARD PATTERN)*/}
+      {/* 10. MODAL: UNIFIED REVIEW & EDIT STOCK REQUEST (IMAGE 2/3 DESIGN PATTERN) */}
       {/* ========================================================================= */}
       {viewingRequest && (() => {
+        const reqIng = ingredients.find(
+          (i) => i.id === viewingRequest.ingredientId || i.name.toLowerCase() === viewingRequest.ingredientName.toLowerCase()
+        );
         const isPending = viewingRequest.status === 'PENDING_APPROVAL';
-        const isApproved = viewingRequest.status === 'APPROVED';
-        const isRejected = viewingRequest.status === 'REJECTED';
         const isDelivery = viewingRequest.type === 'STOCK_DELIVERY';
 
+        const curStock = viewingRequest.currentStock;
+        const calculatedFinal = reviewAction === 'ADD'
+          ? curStock + reviewQty
+          : reviewAction === 'DEDUCT'
+          ? Math.max(0, curStock - reviewQty)
+          : reviewQty;
+        const calculatedDiff = Number((calculatedFinal - curStock).toFixed(2));
+
         const totalCostCents = viewingRequest.totalCents || viewingRequest.costCents || 0;
-        const effectivePaidCents = viewingRequest.paidCents ?? (isApproved && viewingRequest.paymentStatus === 'PAID' ? totalCostCents : 0);
-        const effectiveDueCents = viewingRequest.dueCents ?? Math.max(0, totalCostCents - effectivePaidCents);
-        const effectiveOverpaidCents = Math.max(0, effectivePaidCents - totalCostCents);
-        const isPaid = viewingRequest.paymentStatus === 'PAID' || (effectivePaidCents >= totalCostCents && totalCostCents > 0);
-
-        // Extract payment breakdown
-        const cashPaidCents =
-          viewingRequest.payments?.filter((p) => p.method === 'CASH').reduce((s, p) => s + p.amountCents, 0) ||
-          (isPaid && (!viewingRequest.payments || viewingRequest.payments.length === 0) ? totalCostCents : 0);
-        const cardPaidCents =
-          viewingRequest.payments?.filter((p) => p.method === 'CARD').reduce((s, p) => s + p.amountCents, 0) || 0;
-        const chequePaidCents =
-          viewingRequest.payments?.filter((p) => p.method === 'CHEQUE').reduce((s, p) => s + p.amountCents, 0) || 0;
-        const chequePayment = viewingRequest.payments?.find((p) => p.method === 'CHEQUE');
-
         const itemsList: PurchaseItem[] =
           viewingRequest.items && viewingRequest.items.length > 0
             ? viewingRequest.items
@@ -3279,443 +3418,307 @@ export const AdminInventoryPage: React.FC = () => {
                 {
                   ingredientId: viewingRequest.ingredientId || '',
                   ingredientName: viewingRequest.ingredientName,
-                  quantity: viewingRequest.quantityChange || 1,
+                  quantity: reviewQty,
                   unit: viewingRequest.unit,
-                  unitPriceCents: Math.round((viewingRequest.costCents || 0) / (viewingRequest.quantityChange || 1)),
+                  unitPriceCents: Math.round((viewingRequest.costCents || 0) / (reviewQty || 1)),
                   totalCents: viewingRequest.costCents || 0,
-                  expiryDate: viewingRequest.expiryDate,
+                  expiryDate: reviewExpiry || viewingRequest.expiryDate,
                 },
               ];
 
         return createPortal(
-          <div className="fixed inset-0 z-[99999] w-full h-full bg-black/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-3 lg:p-4 overflow-hidden animate-in fade-in">
-            <div className="w-full max-w-[98vw] 2xl:max-w-[1700px] h-[94vh] max-h-[94vh] flex flex-col">
-              {/* 1. Top Header Row above cards */}
+          <div className="fixed inset-0 z-[99999] w-full h-full bg-black/60 backdrop-blur-md flex items-center justify-center p-3 sm:p-4 overflow-hidden animate-in fade-in">
+            <div className="w-full max-w-lg sm:max-w-xl flex flex-col max-h-[92vh]">
+              {/* Header above card on dark backdrop (Matching Image 2/3) */}
               <div className="flex items-center justify-between gap-3 mb-3 px-1 shrink-0">
-                <div className="min-w-0 flex-1 flex items-center gap-2">
+                <div className="min-w-0 flex-1">
                   <h3 className="font-extrabold text-base sm:text-lg text-white drop-shadow-xs truncate">
-                    Stock Request {viewingRequest.requestNumber}
+                    {isDelivery ? 'Record Goods Delivery' : 'Record Stock Adjustment'}
                   </h3>
-                  <span className="text-[11px] font-bold text-white/70 bg-white/10 px-2.5 py-0.5 rounded-full backdrop-blur-xs hidden sm:inline-block shrink-0">
-                    {isDelivery ? 'Goods Inward Voucher' : 'Stock Adjustment Voucher'}
-                  </span>
-                  <span
-                    className={`px-2.5 py-0.5 rounded-full text-[11px] font-extrabold border ${
-                      isPending
-                        ? 'bg-amber-400/20 text-amber-300 border-amber-400/40 animate-pulse'
-                        : isApproved
-                        ? 'bg-emerald-400/20 text-emerald-300 border-emerald-400/40'
-                        : 'bg-rose-400/20 text-rose-300 border-rose-400/40'
-                    }`}
-                  >
-                    {isPending ? 'Waiting for Admin' : isApproved ? 'Approved & Recorded' : 'Rejected'}
-                  </span>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
-                  {isPending && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const req = viewingRequest;
-                          setViewingRequest(null);
-                          handleRejectStockRequest(req);
-                        }}
-                        className="px-4 py-2 rounded-full bg-rose-500 hover:bg-rose-600 text-white font-extrabold text-xs shadow-md transition-all active:scale-95 whitespace-nowrap cursor-pointer"
-                      >
-                        Reject
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const req = viewingRequest;
-                          setViewingRequest(null);
-                          handleApproveStockRequest(req);
-                        }}
-                        className="px-5 py-2 rounded-full bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-md transition-all active:scale-95 whitespace-nowrap cursor-pointer flex items-center gap-1.5"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Approve & Record Stock</span>
-                      </button>
-                    </>
-                  )}
                   <button
                     type="button"
                     onClick={() => setViewingRequest(null)}
-                    className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                    className="px-4 py-2 rounded-full border border-white/30 text-white hover:bg-white/10 text-xs font-bold transition-all whitespace-nowrap cursor-pointer"
                   >
-                    Close
+                    Cancel
                   </button>
+                  {isPending ? (
+                    <button
+                      type="button"
+                      onClick={() => handleApproveWithEdits()}
+                      className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                    >
+                      Save Adjustment
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setViewingRequest(null)}
+                      className="px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs shadow-teal transition-all active:scale-95 whitespace-nowrap cursor-pointer"
+                    >
+                      Done
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* 2. Main Studio Grid (3 Equal-Height Cards Side-by-Side) */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1 min-h-0 overflow-hidden">
-                {/* ================================================================= */}
-                {/* 1. LEFT CARD: SUPPLIER & REQUEST DETAILS (Col Span 3)             */}
-                {/* ================================================================= */}
-                <div className="lg:col-span-3 xl:col-span-3 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-y-auto space-y-4">
-                  <div className="flex items-center gap-2 pb-2 border-b border-[#EAE3DA] shrink-0">
-                    <div className="w-7 h-7 rounded-xl bg-brand-brown/10 text-brand-brown flex items-center justify-center shrink-0">
-                      <Building2 className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
-                        {isDelivery ? 'Supplier & Invoice Details' : 'Adjustment Details'}
-                      </span>
-                      <span className="text-[10px] text-text-muted leading-none">
-                        Submitted by cashier for review
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Form Fields */}
-                  <div className="space-y-3.5 flex-1">
-                    {isDelivery ? (
-                      <>
-                        <div>
-                          <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
-                            Supplier / Vendor Name
-                          </label>
-                          <div className="w-full pb-1.5 pt-0.5 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark">
-                            {viewingRequest.supplierName || 'General Supplier'}
-                          </div>
-                        </div>
-
-                        <div>
-                          <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
-                            Invoice / Bill Ref #
-                          </label>
-                          <div className="flex items-center justify-between border-b border-[#E2D8CC] pb-1.5 pt-0.5">
-                            <span className="text-xs font-mono font-bold text-brand-brown-dark">
-                              {viewingRequest.invoiceNumber || 'N/A'}
-                            </span>
-                            {viewingRequest.invoiceNumber && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(viewingRequest.invoiceNumber || '');
-                                  toast.success(`Copied "${viewingRequest.invoiceNumber}"`);
-                                }}
-                                className="p-1 text-text-muted hover:text-brand-teal transition-colors cursor-pointer"
-                                title="Copy Invoice Ref"
-                              >
-                                <Copy className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </>
-                    ) : (
-                      <div>
-                        <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
-                          Audited Ingredient
-                        </label>
-                        <div className="w-full pb-1.5 pt-0.5 border-b border-[#E2D8CC] text-xs font-black text-brand-brown-dark">
-                          {viewingRequest.ingredientName}
-                        </div>
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="text-[10px] font-bold uppercase text-text-secondary block mb-1">
-                        Cashier Reason & Note
-                      </label>
-                      <div className="p-2.5 bg-cream-50 rounded-xl border border-[#E0D7CC] text-xs font-medium text-brand-brown-dark italic min-h-[48px]">
-                        "{viewingRequest.reason}"
-                      </div>
-                    </div>
-
-                    {viewingRequest.rejectionReason && (
-                      <div>
-                        <label className="text-[10px] font-bold uppercase text-rose-600 block mb-1">
-                          Admin Rejection Note
-                        </label>
-                        <div className="p-2.5 bg-rose-50 rounded-xl border border-rose-200 text-xs font-medium text-rose-800">
-                          {viewingRequest.rejectionReason}
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Logo Section */}
-                    <div className="pt-2 flex flex-col items-center justify-center opacity-85">
-                      <div className="w-14 h-14 rounded-2xl bg-cream-50 border border-[#E0D7CC] flex items-center justify-center text-2xl shadow-xs">
-                        🐼
-                      </div>
-                      <span className="text-[11px] font-black text-brand-brown-deep tracking-wider uppercase mt-1.5">
-                        Chill & Choc
-                      </span>
-                      <span className="text-[9px] font-bold text-text-muted tracking-tight">
-                        Cashier Authorization Request
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Pinned Bottom Metadata Card */}
-                  <div className="p-3 bg-[#FAF7F2] rounded-2xl border border-[#E2D8CC] space-y-1.5 shrink-0 text-xs mt-auto">
-                    <div className="flex justify-between items-center text-text-secondary">
-                      <span className="text-[10px] font-bold uppercase text-text-muted">Request Date:</span>
-                      <span className="font-mono font-bold text-brand-brown-dark">
-                        {format(new Date(viewingRequest.createdAt), 'dd MMM yyyy, hh:mm a')}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-text-secondary">
-                      <span className="text-[10px] font-bold uppercase text-text-muted">Staff / Cashier:</span>
-                      <span className="font-bold text-brand-teal">{viewingRequest.requestedByUserName}</span>
-                    </div>
-                    <div className="flex justify-between items-center text-text-secondary">
-                      <span className="text-[10px] font-bold uppercase text-text-muted">Review Status:</span>
-                      <span className="font-bold text-brand-brown-dark">
-                        {viewingRequest.resolvedByUserName ? `Reviewed by ${viewingRequest.resolvedByUserName}` : 'Pending Admin'}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-text-secondary pt-1 border-t border-[#E0D7CC]">
-                      <span className="text-[10px] font-bold uppercase text-text-muted">Total Line Items:</span>
-                      <span className="font-black text-brand-brown-dark">{itemsList.length} items</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* ================================================================= */}
-                {/* 2. MIDDLE CARD: RECEIVED LINE ITEMS (Col Span 5)                  */}
-                {/* ================================================================= */}
-                <div className="lg:col-span-5 xl:col-span-5 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-hidden">
-                  <div className="flex items-center justify-between pb-2 border-b border-[#EAE3DA] shrink-0">
-                    <div className="flex items-center gap-2">
-                      <div className="w-7 h-7 rounded-xl bg-brand-teal/10 text-brand-teal flex items-center justify-center shrink-0">
-                        <Package className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
-                          {isDelivery ? 'Proposed Delivery Line Items' : 'Stock Adjustment Breakdown'}
-                        </span>
-                        <span className="text-[10px] text-text-muted leading-none">
-                          {isDelivery ? 'Itemized delivery items awaiting inventory update' : 'Proposed physical count changes'}
-                        </span>
-                      </div>
-                    </div>
-                    <span className="text-[11px] font-extrabold text-brand-teal bg-teal-50 border border-teal-200/80 px-2.5 py-0.5 rounded-full">
-                      {itemsList.length} {itemsList.length === 1 ? 'item' : 'items'}
-                    </span>
-                  </div>
-
-                  {/* Items List */}
-                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 py-3 min-h-0">
-                    {isDelivery ? (
-                      itemsList.map((item, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3 sm:p-3.5 bg-[#FAF7F2] hover:bg-cream-100/70 border border-[#E8DFC8] rounded-2xl transition-all space-y-1.5"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <span className="font-extrabold text-xs sm:text-sm text-brand-brown-deep block leading-tight truncate">
-                                {item.ingredientName}
-                              </span>
-                              <div className="text-[11px] font-bold text-text-muted mt-0.5">
-                                {item.quantity} {item.unit} @ {formatLKR(item.unitPriceCents)}/{item.unit}
-                              </div>
-                            </div>
-                            <div className="text-right shrink-0">
-                              <span className="text-xs sm:text-sm font-black text-brand-brown-dark font-mono block">
-                                {formatLKR(item.totalCents)}
-                              </span>
-                              <span className="inline-block px-2 py-0.2 text-[9px] font-black uppercase tracking-wider rounded-md bg-white border border-[#E2D8CC] text-brand-teal mt-0.5">
-                                {item.unit}
-                              </span>
-                            </div>
-                          </div>
-                          {item.expiryDate && (
-                            <div className="text-[10px] font-medium text-amber-800 bg-amber-50/80 border border-amber-200/80 rounded-lg px-2 py-0.5 inline-flex items-center gap-1">
-                              <Clock className="w-3 h-3 text-amber-700 shrink-0" />
-                              <span>Exp: {item.expiryDate}</span>
-                            </div>
-                          )}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="p-4 bg-[#FAF7F2] border border-[#E8DFC8] rounded-2xl space-y-3">
-                        <div className="text-sm font-black text-brand-brown-deep">
-                          {viewingRequest.ingredientName}
-                        </div>
-                        <div className="grid grid-cols-3 gap-2 text-center">
-                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
-                            <div className="text-[10px] font-bold uppercase text-text-muted">Previous</div>
-                            <div className="text-xs font-black text-text-secondary mt-0.5">
-                              {viewingRequest.currentStock} {viewingRequest.unit}
-                            </div>
-                          </div>
-                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
-                            <div className="text-[10px] font-bold uppercase text-brand-teal">Requested</div>
-                            <div className="text-xs font-black text-brand-brown-deep mt-0.5">
-                              {viewingRequest.requestedStock} {viewingRequest.unit}
-                            </div>
-                          </div>
-                          <div className="p-2.5 bg-white rounded-xl border border-border/60">
-                            <div className="text-[10px] font-bold uppercase text-text-muted">Net Change</div>
-                            <div
-                              className={`text-xs font-black mt-0.5 ${
-                                viewingRequest.quantityChange >= 0 ? 'text-status-success' : 'text-status-danger'
-                              }`}
-                            >
-                              {viewingRequest.quantityChange >= 0
-                                ? `+${viewingRequest.quantityChange}`
-                                : viewingRequest.quantityChange}{' '}
-                              {viewingRequest.unit}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* ================================================================= */}
-                {/* 3. RIGHT CARD: PAYMENT SETTLEMENT & SUMMARY (Col Span 4)          */}
-                {/* ================================================================= */}
-                <div className="lg:col-span-4 xl:col-span-4 flex flex-col h-full min-h-0 bg-white rounded-3xl shadow-sm border border-[#E9E0D5] p-4 sm:p-5 overflow-hidden">
-                  <div className="flex items-center gap-2 pb-2 border-b border-[#EAE3DA] shrink-0">
-                    <div className="w-7 h-7 rounded-xl bg-amber-500/10 text-amber-700 flex items-center justify-center shrink-0">
-                      <Banknote className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <span className="text-xs font-extrabold uppercase text-brand-brown-dark tracking-wider block leading-tight">
-                        Payment Settlement
-                      </span>
-                      <span className="text-[10px] text-text-muted leading-none">
-                        Cashier submitted payment records
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Paid Records Section */}
-                  <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 py-3 min-h-0">
-                    <div className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
-                      Payment Breakdown:
-                    </div>
-
-                    {cashPaidCents > 0 && (
-                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
-                        <div className="flex items-center gap-2">
-                          <Banknote className="w-4 h-4 text-emerald-600" />
-                          <span className="font-black text-brand-brown-deep">Cash Payment</span>
-                        </div>
-                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(cashPaidCents)}</span>
-                      </div>
-                    )}
-
-                    {cardPaidCents > 0 && (
-                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
-                        <div className="flex items-center gap-2">
-                          <CreditCard className="w-4 h-4 text-brand-teal" />
-                          <span className="font-black text-brand-brown-deep">Card / Digital</span>
-                        </div>
-                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(cardPaidCents)}</span>
-                      </div>
-                    )}
-
-                    {chequePaidCents > 0 && (
-                      <div className="flex items-center justify-between p-2.5 bg-[#FAF7F2] rounded-xl border border-[#E0D7CC] text-xs">
-                        <div className="flex items-center gap-2">
-                          <Landmark className="w-4 h-4 text-amber-700" />
-                          <span className="font-black text-brand-brown-deep">Cheque Payment</span>
-                        </div>
-                        <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(chequePaidCents)}</span>
-                      </div>
-                    )}
-
-                    {cashPaidCents === 0 && cardPaidCents === 0 && chequePaidCents === 0 && (
-                      <div className="p-3 bg-cream-50 rounded-xl border border-[#E0D7CC] text-xs text-text-muted text-center italic">
-                        {isDelivery ? 'No upfront payment recorded (Full Supplier Credit)' : 'Audit request (No direct invoice payment)'}
-                      </div>
-                    )}
-
-                    {/* Cheque realization card */}
-                    {chequePayment && (
-                      <div className="p-3 bg-amber-50/90 rounded-xl border border-amber-300/80 text-xs space-y-1 mt-2">
-                        <div className="font-extrabold text-amber-950 flex items-center gap-1.5">
-                          <Landmark className="w-3.5 h-3.5 text-amber-700" />
-                          <span>Cheque Details:</span>
-                        </div>
-                        <div className="text-[11px] text-amber-900">
-                          Ref / Check #: <span className="font-mono font-bold">{chequePayment.chequeNumber || 'N/A'}</span>
-                        </div>
-                        <div className="text-[11px] text-amber-900">
-                          Bank: <span className="font-bold">{chequePayment.bankName || 'Commercial Bank'}</span>
-                        </div>
-                        {chequePayment.chequeDate && (
-                          <div className="text-[11px] text-amber-900">
-                            Realize Date: <span className="font-mono font-bold">{chequePayment.chequeDate}</span>
-                          </div>
+              {/* White rounded-3xl card (Matching Image 2/3) */}
+              <div className="w-full bg-white rounded-3xl shadow-2xl border border-[#E9E0D5] overflow-y-auto">
+                <div className="p-5 sm:p-6 space-y-4">
+                  {/* Field 1: RAW INGREDIENT * */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Raw Ingredient <span className="text-status-danger">*</span>
+                    </label>
+                    <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span>{viewingRequest.ingredientName}</span>
+                        {reqIng?.sku && (
+                          <span className="text-[10px] font-mono font-semibold text-text-muted bg-cream-100 px-1.5 py-0.5 rounded">
+                            {reqIng.sku}
+                          </span>
                         )}
                       </div>
-                    )}
+                      <span className="text-xs font-bold text-brand-teal">
+                        Current: {viewingRequest.currentStock} {viewingRequest.unit}
+                      </span>
+                    </div>
                   </div>
 
-                  {/* Pinned Bottom Financial Settlement Summary Card */}
-                  <div className="p-3.5 bg-[#FAF7F2] rounded-2xl border border-[#E2D8CC] space-y-2 shrink-0 text-xs mt-auto">
-                    <div className="flex justify-between items-center text-text-secondary">
-                      <span>Total Invoiced:</span>
-                      <span className="font-mono font-bold text-brand-brown-dark">{formatLKR(totalCostCents)}</span>
-                    </div>
-                    <div className="flex justify-between items-center font-bold text-brand-teal">
-                      <span>Total Paid:</span>
-                      <span className="font-mono">{formatLKR(effectivePaidCents)}</span>
-                    </div>
-                    {effectiveDueCents > 0 && (
-                      <>
-                        <div className="flex justify-between items-center font-bold text-rose-600 pt-1.5 border-t border-[#E0D7CC]">
-                          <span>Remaining Due (Credit):</span>
-                          <span className="font-mono text-sm">{formatLKR(effectiveDueCents)}</span>
-                        </div>
-                        <div className="flex justify-between items-center text-[11px] text-text-secondary">
-                          <span className="font-bold uppercase text-[10px] text-text-muted">Due Date / Deadline:</span>
-                          <span className="font-mono font-bold text-rose-900 bg-white border border-[#E2D8CC] px-2 py-0.5 rounded-lg text-[11px]">
-                            {viewingRequest.duePaymentDate || 'Pending Schedule'}
-                          </span>
-                        </div>
-                      </>
-                    )}
-                    {effectiveOverpaidCents > 0 && (
-                      <div className="flex justify-between items-center font-bold text-amber-900 bg-amber-100/90 border border-amber-300/80 px-2.5 py-1.5 rounded-xl text-[11px]">
-                        <span className="flex items-center gap-1">
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                          <span>Overpaid Excess:</span>
-                        </span>
-                        <span className="font-mono text-xs font-black text-amber-900">
-                          +{formatLKR(effectiveOverpaidCents)}
-                        </span>
-                      </div>
-                    )}
-
-                    <div className="pt-1.5 text-center">
-                      <span
-                        className={`inline-flex items-center justify-center w-full gap-1 py-1 rounded-xl font-black text-[11px] uppercase border ${
-                          isPending
-                            ? 'bg-amber-100 text-amber-900 border-amber-300'
-                            : isApproved
-                            ? 'bg-status-success-bg text-status-success border-status-success/30'
-                            : 'bg-rose-50 text-rose-700 border-rose-200'
+                  {/* Field 2: ADJUSTMENT ACTION (Interactive 3 pills matching Image 2/3) */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1.5">
+                      Adjustment Action
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        disabled={!isPending}
+                        onClick={() => setReviewAction('ADD')}
+                        className={`py-2 rounded-xl text-xs font-extrabold text-center transition-all border cursor-pointer select-none ${
+                          reviewAction === 'ADD'
+                            ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                            : 'bg-[#FAF7F2] text-text-secondary border-[#E0D7CC] hover:bg-cream-100'
                         }`}
                       >
-                        {isPending ? (
-                          <>
-                            <Clock className="w-3.5 h-3.5 text-amber-700" />
-                            <span>Waiting Authorization</span>
-                          </>
-                        ) : isApproved ? (
-                          <>
-                            <Check className="w-3.5 h-3.5" />
-                            <span>Approved & Recorded</span>
-                          </>
-                        ) : (
-                          <>
-                            <XCircle className="w-3.5 h-3.5" />
-                            <span>Rejected by Admin</span>
-                          </>
-                        )}
+                        + Add Stock
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!isPending}
+                        onClick={() => setReviewAction('DEDUCT')}
+                        className={`py-2 rounded-xl text-xs font-extrabold text-center transition-all border cursor-pointer select-none ${
+                          reviewAction === 'DEDUCT'
+                            ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                            : 'bg-[#FAF7F2] text-text-secondary border-[#E0D7CC] hover:bg-cream-100'
+                        }`}
+                      >
+                        - Deduct / Waste
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!isPending}
+                        onClick={() => setReviewAction('EXACT')}
+                        className={`py-2 rounded-xl text-xs font-extrabold text-center transition-all border cursor-pointer select-none ${
+                          reviewAction === 'EXACT'
+                            ? 'bg-[#251814] text-white border-[#251814] shadow-xs'
+                            : 'bg-[#FAF7F2] text-text-secondary border-[#E0D7CC] hover:bg-cream-100'
+                        }`}
+                      >
+                        = Exact Count
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Field 3: QUANTITY TO ADJUST (Interactive counter matching Image 2/3) */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Quantity to Adjust ({viewingRequest.unit})
+                    </label>
+                    <div className="flex items-center gap-2 mt-1">
+                      <button
+                        type="button"
+                        disabled={!isPending}
+                        onClick={() => setReviewQty((q) => Math.max(0.01, Number((q - 1).toFixed(2))))}
+                        className="w-10 h-10 rounded-2xl bg-[#FAF7F2] hover:bg-cream-200 border border-[#E0D7CC] flex items-center justify-center text-text-muted hover:text-brand-brown-dark font-bold shrink-0 select-none cursor-pointer active:scale-95 transition-all disabled:opacity-50"
+                      >
+                        <Minus className="w-4 h-4" />
+                      </button>
+                      <input
+                        type="number"
+                        step="any"
+                        min="0.01"
+                        disabled={!isPending}
+                        value={reviewQty}
+                        onChange={(e) => setReviewQty(parseFloat(e.target.value) || 0)}
+                        className="flex-1 h-10 px-3 bg-white border border-[#E2D8CC] rounded-2xl text-center text-base font-black text-brand-brown-dark outline-none focus:border-brand-teal transition-colors disabled:bg-cream-50"
+                      />
+                      <button
+                        type="button"
+                        disabled={!isPending}
+                        onClick={() => setReviewQty((q) => Number((q + 1).toFixed(2)))}
+                        className="w-10 h-10 rounded-2xl bg-[#FAF7F2] hover:bg-cream-200 border border-[#E0D7CC] flex items-center justify-center text-text-muted hover:text-brand-brown-dark font-bold shrink-0 select-none cursor-pointer active:scale-95 transition-all disabled:opacity-50"
+                      >
+                        <Plus className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    {/* Stock Transition Details */}
+                    <div className="flex items-center justify-between text-xs font-bold text-text-secondary pt-1.5 px-0.5">
+                      <span>
+                        Stock change: {curStock} {viewingRequest.unit} →{' '}
+                        <strong className="text-brand-brown-deep font-black">
+                          {calculatedFinal} {viewingRequest.unit}
+                        </strong>
+                      </span>
+                      <span
+                        className={
+                          calculatedDiff >= 0
+                            ? 'text-status-success font-black'
+                            : 'text-status-danger font-black'
+                        }
+                      >
+                        ({calculatedDiff >= 0 ? `+${calculatedDiff}` : calculatedDiff}{' '}
+                        {viewingRequest.unit})
                       </span>
                     </div>
+                  </div>
+
+                  {/* Field 4: EXPIRY DATE (Directly Editable inside this modal) */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Expiry Date (Optional)
+                    </label>
+                    <input
+                      type="date"
+                      disabled={!isPending}
+                      value={reviewExpiry}
+                      onChange={(e) => setReviewExpiry(e.target.value)}
+                      className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-mono font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors cursor-pointer disabled:text-text-muted"
+                    />
+                  </div>
+
+                  {/* Field 5 (If Delivery): Total Invoice Cost (Rs.) */}
+                  {isDelivery && (
+                    <div>
+                      <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                        Total Invoice Cost (Rs.)
+                      </label>
+                      <input
+                        type="number"
+                        step="any"
+                        disabled={!isPending}
+                        value={reviewCost}
+                        onChange={(e) => setReviewCost(e.target.value)}
+                        placeholder="e.g. 5000.00"
+                        className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-mono font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors disabled:text-text-muted"
+                      />
+                    </div>
+                  )}
+
+                  {/* Field 6: AUDIT REASON / NOTE * */}
+                  <div>
+                    <label className="text-[11px] font-bold uppercase text-text-secondary block mb-1">
+                      Audit Reason / Note <span className="text-status-danger">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      disabled={!isPending}
+                      value={reviewReason}
+                      onChange={(e) => setReviewReason(e.target.value)}
+                      placeholder="Audit reason or note..."
+                      className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal rounded-none transition-colors disabled:text-text-muted"
+                    />
+                    <div className="flex items-center justify-between text-[11px] text-text-muted pt-1 px-0.5">
+                      <span>
+                        Submitted by: <strong className="text-brand-brown-dark">{viewingRequest.requestedByUserName}</strong>
+                      </span>
+                      <span className="font-mono">{format(new Date(viewingRequest.createdAt), 'hh:mm a • dd MMM yyyy')}</span>
+                    </div>
+                  </div>
+
+                  {/* If Delivery Intake (Supplier / Invoice details) */}
+                  {isDelivery && itemsList.length > 0 && (
+                    <div className="p-3.5 bg-amber-50/60 rounded-2xl border border-amber-200/80 space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-amber-950 uppercase text-[10px] tracking-wider">
+                          Delivery Line Items ({itemsList.length})
+                        </span>
+                        <span className="font-mono font-black text-brand-brown-deep">{formatLKR(totalCostCents)}</span>
+                      </div>
+                      <div className="space-y-1 max-h-32 overflow-y-auto">
+                        {itemsList.map((item, idx) => (
+                          <div
+                            key={idx}
+                            className="flex justify-between items-center text-[11px] bg-white/80 p-1.5 rounded-lg border border-amber-200/50"
+                          >
+                            <span className="font-bold text-brand-brown-dark">{item.ingredientName}</span>
+                            <span className="font-mono">
+                              {item.quantity} {item.unit} • {formatLKR(item.totalCents)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      {viewingRequest.supplierName && (
+                        <div className="text-[11px] text-text-secondary pt-1 border-t border-amber-200/60 flex justify-between">
+                          <span>
+                            Supplier: <strong>{viewingRequest.supplierName}</strong>
+                          </span>
+                          {viewingRequest.invoiceNumber && (
+                            <span>
+                              Inv #: <strong>{viewingRequest.invoiceNumber}</strong>
+                            </span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Rejection Note if already rejected */}
+                  {viewingRequest.rejectionReason && (
+                    <div className="p-3 bg-rose-50 rounded-2xl border border-rose-200 text-xs text-rose-800">
+                      <span className="font-bold block mb-0.5">Rejection Reason:</span>
+                      {viewingRequest.rejectionReason}
+                    </div>
+                  )}
+
+                  {/* Bottom Action Footer inside card */}
+                  <div className="pt-3 border-t border-[#EAE3DA] flex items-center justify-between gap-2">
+                    {isPending ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const r = viewingRequest;
+                            setViewingRequest(null);
+                            handleRejectStockRequest(r);
+                          }}
+                          className="px-3.5 py-2 rounded-xl border border-rose-200 bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition-all cursor-pointer"
+                        >
+                          Reject
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleApproveWithEdits()}
+                          className="px-5 py-2 rounded-xl bg-brand-teal hover:bg-brand-teal-dark text-white font-black text-xs shadow-teal transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Approve Request</span>
+                        </button>
+                      </>
+                    ) : (
+                      <div className="w-full flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setViewingRequest(null)}
+                          className="px-5 py-2 rounded-xl bg-brand-teal hover:bg-brand-teal-dark text-white font-black text-xs shadow-teal cursor-pointer"
+                        >
+                          Close
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3724,109 +3727,6 @@ export const AdminInventoryPage: React.FC = () => {
           document.body
         );
       })()}
-
-      {/* 5. MODAL: EDIT & APPROVE STOCK REQUEST */}
-      {editingRequest &&
-        createPortal(
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in">
-            <div className="bg-white w-full max-w-md rounded-3xl border border-[#E9E0D5] shadow-2xl p-6 space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-[#EAE3DA]">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-800">
-                    <Edit2 className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-base font-black text-brand-brown-deep">Modify & Authorize Request</h3>
-                    <p className="text-xs text-text-muted">Adjust quantity/cost before approving into inventory</p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setEditingRequest(null)}
-                  className="w-8 h-8 rounded-full bg-cream-50 hover:bg-cream-100 flex items-center justify-center text-text-muted hover:text-brand-brown-dark transition-all cursor-pointer"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <form onSubmit={handleSaveAndApproveRequest} className="space-y-3.5">
-                {/* Item Details */}
-                <div className="p-3 bg-cream-50 rounded-2xl border border-border/60">
-                  <div className="text-xs font-black text-brand-brown-deep">{editingRequest.ingredientName}</div>
-                  <div className="text-[10px] text-text-secondary mt-0.5">
-                    Requested by <span className="font-bold">{editingRequest.requestedByUserName}</span> ({editingRequest.type === 'STOCK_DELIVERY' ? 'Goods Delivery' : 'Adjustment'})
-                  </div>
-                  <div className="text-[10px] text-text-muted mt-1 italic">
-                    "{editingRequest.reason}"
-                  </div>
-                </div>
-
-                {/* Quantity */}
-                <div>
-                  <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
-                    {editingRequest.type === 'STOCK_ADJUSTMENT' ? `Final Adjusted Stock (${editingRequest.unit})` : `Delivered Quantity (${editingRequest.unit})`}
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={editRequestQty}
-                    onChange={(e) => setEditRequestQty(e.target.value)}
-                    required
-                    className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-sm font-black text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
-                  />
-                </div>
-
-                {/* Cost (For deliveries) */}
-                {editingRequest.type === 'STOCK_DELIVERY' && (
-                  <div>
-                    <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
-                      Total Invoice Cost (Rs.)
-                    </label>
-                    <input
-                      type="number"
-                      step="any"
-                      value={editRequestCost}
-                      onChange={(e) => setEditRequestCost(e.target.value)}
-                      placeholder="e.g. 5000.00"
-                      className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-xs font-bold text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
-                    />
-                  </div>
-                )}
-
-                {/* Expiry Date */}
-                <div>
-                  <label className="block text-xs font-black text-brand-brown-deep uppercase tracking-wider mb-1">
-                    Expiry Date
-                  </label>
-                  <input
-                    type="date"
-                    value={editRequestExpiry}
-                    onChange={(e) => setEditRequestExpiry(e.target.value)}
-                    className="w-full h-10 px-3 bg-white border border-[#E0D7CC] rounded-xl text-xs font-medium text-brand-brown-deep focus:outline-none focus:ring-2 focus:ring-brand-teal/30"
-                  />
-                </div>
-
-                <div className="pt-3 border-t border-[#EAE3DA] flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setEditingRequest(null)}
-                    className="px-4 py-2 rounded-xl border border-[#E0D7CC] bg-white text-xs font-bold text-text-secondary hover:bg-cream-50 cursor-pointer"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black shadow-xs transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
-                  >
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Approve Changes</span>
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>,
-          document.body
-        )}
     </div>
   );
 };

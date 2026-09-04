@@ -1,12 +1,21 @@
 import { db } from './storage/db';
+import { supabase } from './supabaseClient';
 import { User, AuthSession, Role } from '@/types';
 
 const SESSION_KEY = 'chill_choc_auth_session';
 
 export const authService = {
   login: async (username: string, pinOrPassword: string, terminalId = 'term_01'): Promise<AuthSession> => {
-    const data = db.getSnapshot();
-    const user = data.users.find(
+    let users = db.getSnapshot().users;
+    if (!users || users.length === 0) {
+      const { data: remoteUsers } = await supabase.from('users').select('*');
+      if (remoteUsers && remoteUsers.length > 0) {
+        db.update('users', () => remoteUsers);
+        users = remoteUsers;
+      }
+    }
+
+    const user = users?.find(
       (u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.active
     );
 

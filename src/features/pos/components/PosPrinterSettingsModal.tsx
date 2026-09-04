@@ -33,8 +33,11 @@ import {
   Volume2,
   Layers,
   Calendar,
+  Zap,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { printThermalElement } from '@/utils/printThermal';
+import { directPrintService, AgentHealthStatus, AgentPrinterInfo } from '@/services/directPrintService';
 
 const getTodayDateStr = () => new Date().toISOString().slice(0, 10);
 
@@ -52,6 +55,13 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
   const [jobs, setJobs] = useState<PrinterJob[]>(printerService.getJobs());
   const [settings, setSettings] = useState<SystemSettings>(settingsService.getSettings());
   const [stations, setStations] = useState<PreparationStation[]>(db.getSnapshot().stations || []);
+
+  // Direct Thermal Printing (Windows Local Print Agent) states
+  const [agentStatus, setAgentStatus] = useState<AgentHealthStatus | null>(null);
+  const [detectedPrinters, setDetectedPrinters] = useState<AgentPrinterInfo[]>([]);
+  const [isRefreshingAgent, setIsRefreshingAgent] = useState(false);
+  const [isTestingDirectPrint, setIsTestingDirectPrint] = useState(false);
+  const [isTestingDrawer, setIsTestingDrawer] = useState(false);
 
   const [editingPrinter, setEditingPrinter] = useState<Partial<PrinterConfig> | null>(null);
   const [viewingTestJob, setViewingTestJob] = useState<PrinterJob | null>(null);
@@ -116,15 +126,174 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose, editingPrinter, viewingTestJob]);
 
-  if (!isOpen) return null;
-
   const handleTestPrint = async (printer: PrinterConfig) => {
+    // If it's a USB / Direct printer, trigger real direct ESC/POS hardware print
+    if (directPrintService.isEnabled() || printer.connectionType === 'USB') {
+      toast.loading(`Sending test slip to ${printer.name}...`, { id: 'test-slip' });
+      const res = await directPrintService.testPrint(printer.name);
+      if (res.success) {
+        toast.success(`Diagnostic test slip printed to ${printer.name}!`, { id: 'test-slip', icon: '🖨️' });
+      } else {
+        toast.error(res.message || `Failed to print to ${printer.name}`, { id: 'test-slip' });
+      }
+      return;
+    }
+
     const result = await printerService.testPrint(printer.id);
     const testJob = printerService.getJobs().find((j) => j.id === result.jobId);
     if (testJob) {
       setViewingTestJob(testJob);
     }
     toast.success(`Diagnostic test slip printed to ${printer.name}`);
+  };
+
+  // Refresh Windows Local Print Agent health, discover physical printers, and sync real hardware
+  const refreshAgent = async (showToast = false) => {
+    setIsRefreshingAgent(true);
+    try {
+      const health = await directPrintService.checkAgentHealth(settings.directPrintAgentUrl);
+      setAgentStatus(health);
+
+      if (health.online) {
+        const prns = await directPrintService.getAvailablePrinters(settings.directPrintAgentUrl);
+        setDetectedPrinters(prns);
+
+        // Filter strictly genuine thermal / receipt printers (ignore Generic/Text Only, Fax, PDF, OneNote, XPS)
+        const thermalPrns = prns.filter(
+          (p) =>
+            !/generic \/ text only|fax|pdf|onenote|xps|document writer/i.test(p.name) &&
+            (p.isLikelyThermal ||
+              /xp-|80|pos|receipt|thermal/i.test(p.name) ||
+              /xp-|80|pos|receipt|thermal/i.test(p.driver))
+        );
+        const candidates = thermalPrns;
+
+        if (candidates.length > 0 && !settings.directPrintPrinterName) {
+          setSettings((prev) => ({ ...prev, directPrintPrinterName: candidates[0].name }));
+        }
+
+        // Live hardware sync: sync real Windows printers into db.printers & purge any dummy mock printers
+        db.update('printers', (currentPrinters) => {
+          // Remove any dummy / mock placeholders and Generic / Text Only completely
+          const cleaned = (currentPrinters || []).filter(
+            (p) =>
+              p &&
+              p.name &&
+              p.name !== 'Thermal Printer' &&
+              p.name !== 'New Thermal Printer' &&
+              p.name !== 'USB Printer Port' &&
+              p.name !== 'Generic / Text Only' &&
+              !p.id?.startsWith('prn_receipt_80mm') &&
+              !p.id?.startsWith('prn_kitchen_80mm') &&
+              !p.id?.startsWith('prn_bar_80mm') &&
+              !p.id?.startsWith('prn_dessert_80mm')
+          );
+
+          // For each detected real printer on Windows, add or update its live online status
+          candidates.forEach((detected, idx) => {
+            const existingIdx = cleaned.findIndex((p) => p.name.toLowerCase() === detected.name.toLowerCase());
+            if (existingIdx >= 0) {
+              cleaned[existingIdx] = {
+                ...cleaned[existingIdx],
+                isOnline: Boolean(detected.isOnline),
+                address: detected.port || cleaned[existingIdx].address || 'USB',
+              };
+            } else {
+              cleaned.push({
+                id: `prn_${detected.name.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`,
+                name: detected.name,
+                role: 'RECEIPT',
+                connectionType: 'USB',
+                address: detected.port || 'USB',
+                paperWidthMm: 80,
+                autoCut: true,
+                drawerKickRJ12: true,
+                beepOnPrint: true,
+                copies: 1,
+                isOnline: Boolean(detected.isOnline),
+                isDefaultReceipt: idx === 0,
+              });
+            }
+          });
+
+          return cleaned;
+        });
+
+        if (showToast) {
+          if (candidates.length > 0) {
+            const onlineCount = candidates.filter((c) => c.isOnline).length;
+            toast.success(`Found ${candidates.length} printer(s) (${onlineCount} online)!`, { icon: '🖨️' });
+          } else {
+            toast.info('No thermal printers detected on this computer.');
+          }
+        }
+      } else {
+        // Agent offline: purge any dummy mock printers
+        db.update('printers', (currentPrinters) =>
+          (currentPrinters || []).filter(
+            (p) =>
+              p &&
+              p.name &&
+              p.name !== 'Thermal Printer' &&
+              p.name !== 'New Thermal Printer' &&
+              p.name !== 'USB Printer Port' &&
+              !p.id?.startsWith('prn_receipt_80mm') &&
+              !p.id?.startsWith('prn_kitchen_80mm') &&
+              !p.id?.startsWith('prn_bar_80mm') &&
+              !p.id?.startsWith('prn_dessert_80mm')
+          )
+        );
+        if (showToast) {
+          toast.error('Local Print Agent is not responding on localhost:23456');
+        }
+      }
+    } finally {
+      setIsRefreshingAgent(false);
+    }
+  };
+
+  const handleScanHardware = async () => {
+    await refreshAgent(true);
+  };
+
+  // Live polling while modal is open to update plug/unplug hardware status in real-time
+  useEffect(() => {
+    if (!isOpen) return;
+    refreshAgent(false);
+
+    const interval = setInterval(() => {
+      refreshAgent(false);
+    }, 3500);
+
+    return () => clearInterval(interval);
+  }, [isOpen]);
+
+  const handleDirectTestPrint = async () => {
+    setIsTestingDirectPrint(true);
+    try {
+      const res = await directPrintService.testPrint(settings.directPrintPrinterName);
+      if (res.success) {
+        toast.success(res.message, { icon: '🖨️' });
+      } else {
+        toast.error(res.message || 'Direct test print failed');
+      }
+    } finally {
+      setIsTestingDirectPrint(false);
+    }
+  };
+
+  const handleDirectDrawerKick = async () => {
+    setIsTestingDrawer(true);
+    try {
+      const res = await directPrintService.openCashDrawer(settings.directPrintPrinterName);
+      if (res.success) {
+        toast.success(res.message, { icon: '💵' });
+      } else {
+        toast.error(res.message || 'Cash drawer kick failed');
+      }
+    } finally {
+      setIsTestingDrawer(false);
+    }
   };
 
   const handleTestDrawerKick = async () => {
@@ -179,6 +348,8 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
     return true;
   });
 
+  if (!isOpen) return null;
+
   return (
     <div
       onClick={(e) => {
@@ -193,54 +364,54 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
         className="w-full max-w-4xl bg-white rounded-3xl sm:rounded-[32px] shadow-2xl border border-border/80 overflow-hidden flex flex-col max-h-[92vh] transition-all select-text"
       >
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-5 sm:px-8 py-4 sm:py-5 bg-gradient-to-r from-cream-50 to-white border-b border-border/70">
-          <div className="flex items-center gap-3.5">
-            <div className="w-11 h-11 rounded-2xl bg-brand-teal-light border border-brand-teal/20 text-brand-teal flex items-center justify-center shadow-sm">
-              <Printer className="w-5 h-5 stroke-[2.2]" />
+        <div className="flex items-center justify-between px-6 py-4 bg-white border-b border-border/70">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-brand-teal-light text-brand-teal flex items-center justify-center shadow-xs">
+              <Printer className="w-5 h-5 stroke-[2]" />
             </div>
             <div>
-              <h3 className="font-extrabold text-base sm:text-lg text-brand-brown-dark tracking-tight">
-                POS Printer Management & Hardware Routing
+              <h3 className="font-bold text-base text-brand-brown-dark tracking-tight">
+                Printers &amp; Hardware
               </h3>
               <p className="text-xs text-text-secondary">
-                Configure 80mm ESC/POS receipt, kitchen, and bar thermal printers
+                Manage thermal receipt printers and hardware routing
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            className="w-9 h-9 flex items-center justify-center text-text-secondary hover:text-brand-brown-dark hover:bg-cream-100 rounded-xl transition-all"
+            className="w-8 h-8 flex items-center justify-center text-text-secondary hover:text-brand-brown-dark hover:bg-cream-100 rounded-xl transition-all cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Modern Segmented Tab Bar */}
-        <div className="px-5 sm:px-8 py-3 bg-cream-50/50 border-b border-border/60">
-          <div className="inline-flex p-1 bg-cream-200/70 rounded-2xl border border-cream-200 gap-1 w-full sm:w-auto overflow-x-auto">
+        <div className="px-6 py-2.5 bg-cream-50/50 border-b border-border/60">
+          <div className="inline-flex p-1 bg-cream-200/60 rounded-xl border border-cream-200/80 gap-1">
             <button
               onClick={() => setActiveTab('PRINTERS')}
-              className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-extrabold text-xs transition-all whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg font-bold text-xs transition-all whitespace-nowrap cursor-pointer ${
                 activeTab === 'PRINTERS'
-                  ? 'bg-brand-teal text-white shadow-teal'
+                  ? 'bg-brand-teal text-white shadow-xs'
                   : 'text-text-secondary hover:text-brand-brown-dark'
               }`}
             >
-              <Printer className="w-4 h-4" />
-              <span>Configured Printers ({printers.length})</span>
+              <Printer className="w-3.5 h-3.5" />
+              <span>Printers ({printers.length})</span>
             </button>
 
             <button
               onClick={() => setActiveTab('QUEUE')}
-              className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-extrabold text-xs transition-all whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg font-bold text-xs transition-all whitespace-nowrap cursor-pointer ${
                 activeTab === 'QUEUE'
-                  ? 'bg-brand-teal text-white shadow-teal'
+                  ? 'bg-brand-teal text-white shadow-xs'
                   : 'text-text-secondary hover:text-brand-brown-dark'
               }`}
             >
-              <FileText className="w-4 h-4" />
-              <span>Print Queue & Logs ({jobs.length})</span>
+              <FileText className="w-3.5 h-3.5" />
+              <span>Print Queue ({jobs.length})</span>
               {jobs.some((j) => j.status === 'FAILED') && (
                 <span className="w-2 h-2 rounded-full bg-status-danger animate-pulse" />
               )}
@@ -248,14 +419,14 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
 
             <button
               onClick={() => setActiveTab('SETTINGS')}
-              className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl font-extrabold text-xs transition-all whitespace-nowrap ${
+              className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg font-bold text-xs transition-all whitespace-nowrap cursor-pointer ${
                 activeTab === 'SETTINGS'
-                  ? 'bg-brand-teal text-white shadow-teal'
+                  ? 'bg-brand-teal text-white shadow-xs'
                   : 'text-text-secondary hover:text-brand-brown-dark'
               }`}
             >
-              <Settings2 className="w-4 h-4" />
-              <span>Printing Rules</span>
+              <Settings2 className="w-3.5 h-3.5" />
+              <span>Rules &amp; Preferences</span>
             </button>
           </div>
         </div>
@@ -265,38 +436,42 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
           className={`flex-1 ${
             activeTab === 'QUEUE'
               ? 'overflow-hidden flex flex-col p-4 sm:p-6'
-              : 'overflow-y-auto p-5 sm:p-8 space-y-6'
+              : 'overflow-y-auto p-5 sm:p-6 space-y-5'
           }`}
         >
           {/* TAB 1: PRINTERS LIST */}
           {activeTab === 'PRINTERS' && (
-            <div className="space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-4">
+              <div className="flex items-center justify-between gap-3 pb-1">
                 <div>
-                  <h4 className="font-extrabold text-sm sm:text-base text-brand-brown-dark">
-                    Connected Receipt &amp; Prep Printers
+                  <h4 className="font-bold text-sm text-brand-brown-dark">
+                    Connected Printers
                   </h4>
                   <p className="text-xs text-text-secondary">
-                    Manage ESC/POS printer routing, test diagnostic prints, and cash drawer solenoid
+                    Thermal receipt printers detected on this computer
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2.5 self-start sm:self-auto">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
-                    onClick={handleTestDrawerKick}
-                    className="flex items-center gap-1.5 px-3.5 py-2.5 bg-brand-yellow-light hover:bg-brand-yellow/30 text-amber-900 border border-brand-yellow/50 rounded-xl font-extrabold text-xs shadow-sm transition-all active:scale-95 cursor-pointer"
+                    type="button"
+                    onClick={handleScanHardware}
+                    disabled={isRefreshingAgent}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-cream-100 text-brand-brown-dark border border-border/80 rounded-xl font-bold text-xs shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                    title="Rescan connected USB and thermal printers"
                   >
-                    <Coins className="w-4 h-4 text-brand-orange" />
-                    Test Drawer Kick
+                    <RotateCw className={`w-3.5 h-3.5 text-brand-teal ${isRefreshingAgent ? 'animate-spin' : ''}`} />
+                    <span>{isRefreshingAgent ? 'Scanning...' : 'Rescan'}</span>
                   </button>
 
                   <button
+                    type="button"
                     onClick={() =>
                       setEditingPrinter({
-                        name: '',
-                        role: 'RECEIPT',
+                        name: 'Kitchen Thermal',
+                        role: 'KITCHEN_KOT',
                         connectionType: 'LAN_IP',
-                        address: '192.168.1.100:9100',
+                        address: '192.168.1.200:9100',
                         paperWidthMm: 80,
                         autoCut: true,
                         drawerKickRJ12: false,
@@ -306,127 +481,189 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                         isDefaultReceipt: false,
                       })
                     }
-                    className="flex items-center gap-1.5 px-4 py-2.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-black text-xs shadow-teal transition-all active:scale-95 cursor-pointer"
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-bold text-xs shadow-teal transition-all cursor-pointer active:scale-95"
                   >
-                    <Plus className="w-4 h-4 stroke-[2.5]" />
-                    Add Printer
+                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                    <span>Add Network Printer</span>
                   </button>
                 </div>
               </div>
 
-              {/* Printers Card Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5">
-                {printers.map((printer) => {
-                  const ConnectionIcon =
-                    printer.connectionType === 'LAN_IP'
-                      ? Wifi
-                      : printer.connectionType === 'USB'
-                      ? Usb
-                      : printer.connectionType === 'BLUETOOTH'
-                      ? Bluetooth
-                      : Monitor;
-                  return (
-                    <div
-                      key={printer.id}
-                      className="bg-white p-5 rounded-3xl border-2 border-border/80 hover:border-brand-teal/40 hover:shadow-md transition-all duration-200 flex flex-col justify-between space-y-4"
+              {/* Printers Card Grid or Clean Empty State */}
+              {printers.length === 0 ? (
+                <div className="py-16 px-6 text-center border-2 border-dashed border-border/80 rounded-3xl bg-cream-50/40 flex flex-col items-center justify-center space-y-4 animate-in fade-in">
+                  <div className="w-14 h-14 rounded-2xl bg-cream-100 border border-cream-200 text-brand-brown/60 flex items-center justify-center shadow-inner">
+                    <Printer className="w-7 h-7" />
+                  </div>
+                  <div>
+                    <h4 className="text-base font-extrabold text-brand-brown-dark mb-1">
+                      No Thermal Printers Connected
+                    </h4>
+                    <p className="text-xs text-text-secondary max-w-md mx-auto">
+                      Plug your XP-80C or thermal receipt printer into this computer via USB. Windows will register it and it will appear here automatically.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-3 pt-2">
+                    <button
+                      type="button"
+                      onClick={handleScanHardware}
+                      disabled={isRefreshingAgent}
+                      className="flex items-center gap-2 px-5 py-2 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-bold text-xs shadow-teal transition-all cursor-pointer"
                     >
-                      <div className="space-y-3">
-                        {/* Device Header */}
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex items-center gap-3">
-                            <div className="w-11 h-11 rounded-2xl bg-cream-100/90 text-brand-teal flex items-center justify-center border border-cream-200/80 shadow-xs">
-                              <ConnectionIcon className="w-5 h-5 stroke-[2]" />
-                            </div>
-                            <div>
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <h5 className="font-extrabold text-sm text-brand-brown-dark">
-                                  {printer.name}
-                                </h5>
-                                {printer.isDefaultReceipt && (
-                                  <span className="px-2 py-0.5 rounded-full bg-brand-teal-light text-brand-teal font-extrabold text-[10px] uppercase">
-                                    Default Receipt
-                                  </span>
-                                )}
+                      <RotateCw className={`w-3.5 h-3.5 ${isRefreshingAgent ? 'animate-spin' : ''}`} />
+                      <span>{isRefreshingAgent ? 'Scanning Hardware...' : 'Scan / Detect Hardware'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setEditingPrinter({
+                          name: 'Kitchen Thermal',
+                          role: 'KITCHEN_KOT',
+                          connectionType: 'LAN_IP',
+                          address: '192.168.1.200:9100',
+                          paperWidthMm: 80,
+                          autoCut: true,
+                          drawerKickRJ12: false,
+                          beepOnPrint: true,
+                          copies: 1,
+                          isOnline: true,
+                          isDefaultReceipt: false,
+                        })
+                      }
+                      className="px-4 py-2 bg-white border border-border/80 hover:bg-cream-100 text-brand-brown-dark rounded-xl font-bold text-xs transition-all cursor-pointer"
+                    >
+                      + Add LAN IP Printer
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {(printers || []).filter(Boolean).map((printer) => {
+                    const ConnectionIcon =
+                      printer.connectionType === 'LAN_IP'
+                        ? Wifi
+                        : printer.connectionType === 'USB'
+                        ? Usb
+                        : printer.connectionType === 'BLUETOOTH'
+                        ? Bluetooth
+                        : Monitor;
+                    return (
+                      <div
+                        key={printer.id}
+                        className="bg-white p-5 rounded-2xl border border-border/80 hover:border-brand-teal/40 hover:shadow-xs transition-all flex flex-col justify-between space-y-4"
+                      >
+                        <div className="space-y-3">
+                          {/* Device Header */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-brand-teal-light text-brand-teal flex items-center justify-center border border-brand-teal/20 shrink-0">
+                                <ConnectionIcon className="w-5 h-5 stroke-[2]" />
                               </div>
-                              <p className="text-xs font-mono text-text-secondary mt-0.5">{printer.address}</p>
+                              <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h5 className="font-bold text-sm text-brand-brown-dark">
+                                    {printer.name}
+                                  </h5>
+                                  {printer.isDefaultReceipt && (
+                                    <span className="px-2 py-0.5 rounded-full bg-brand-teal/10 text-brand-teal font-bold text-[10px]">
+                                      Default
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-text-muted mt-0.5">
+                                  {printer.connectionType} • {printer.paperWidthMm || 80}mm Thermal • {printer.address || 'Port'}
+                                </p>
+                              </div>
+                            </div>
+
+                            {/* Live Hardware Status Pill */}
+                            <div
+                              className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold transition-all select-none shrink-0 ${
+                                printer.isOnline
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              }`}
+                              title={printer.isOnline ? 'Hardware connected and ready to print' : 'Hardware unplugged or turned off'}
+                            >
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  printer.isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'
+                                }`}
+                              />
+                              <span>{printer.isOnline ? 'Online' : 'Offline'}</span>
                             </div>
                           </div>
 
-                          {/* Online Toggle Pill */}
-                          <button
-                            onClick={() => handleToggleOnline(printer.id)}
-                            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-extrabold transition-all cursor-pointer ${
-                              printer.isOnline
-                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                : 'bg-rose-50 text-rose-700 border border-rose-200'
-                            }`}
-                          >
-                            <span
-                              className={`w-2 h-2 rounded-full ${
-                                printer.isOnline ? 'bg-emerald-500 shadow-sm' : 'bg-rose-500'
-                              }`}
-                            />
-                            <span>{printer.isOnline ? 'Online' : 'Offline'}</span>
-                          </button>
+                          {/* Feature Badges - Subtle & Clean */}
+                          <div className="flex items-center gap-2 text-[11px] text-text-secondary pt-0.5">
+                            <span className="px-2 py-0.5 rounded-lg bg-cream-50 text-brand-brown-dark font-medium border border-border/60">
+                              Role: {(printer.role || 'RECEIPT').replace(/_/g, ' ')}
+                            </span>
+                            {printer.drawerKickRJ12 && (
+                              <span className="px-2 py-0.5 rounded-lg bg-cream-50 text-brand-brown-dark font-medium border border-border/60">
+                                Cash Drawer Ready
+                              </span>
+                            )}
+                            {printer.autoCut && (
+                              <span className="px-2 py-0.5 rounded-lg bg-cream-50 text-brand-brown-dark font-medium border border-border/60">
+                                Auto-Cut
+                              </span>
+                            )}
+                          </div>
                         </div>
 
-                        {/* Feature Badges */}
-                        <div className="flex flex-wrap gap-1.5 pt-1 text-[11px]">
-                          <span className="px-2.5 py-1 rounded-xl bg-cream-100/80 text-brand-brown-dark font-extrabold uppercase border border-cream-200/60">
-                            Role: {printer.role.replace(/_/g, ' ')}
-                          </span>
-                          <span className="px-2.5 py-1 rounded-xl bg-cream-100/80 text-text-primary font-bold border border-cream-200/60">
-                            {printer.paperWidthMm}mm Thermal
-                          </span>
-                          {printer.drawerKickRJ12 && (
-                            <span className="px-2.5 py-1 rounded-xl bg-brand-yellow-light text-amber-900 font-extrabold border border-brand-yellow/40 flex items-center gap-1">
-                              <Coins className="w-3 h-3 text-brand-orange" />
-                              RJ12 Solenoid
-                            </span>
-                          )}
-                          {printer.autoCut && (
-                            <span className="px-2.5 py-1 rounded-xl bg-cream-100/80 text-text-secondary font-medium border border-cream-200/60 flex items-center gap-1">
-                              <Scissors className="w-3 h-3 text-text-secondary" />
-                              Auto-Cut
-                            </span>
-                          )}
+                        {/* Action buttons */}
+                        <div className="flex items-center justify-between pt-3 border-t border-border/60">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleTestPrint(printer)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 bg-cream-100 hover:bg-cream-200 text-brand-brown-dark rounded-xl text-xs font-bold transition-all cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5" />
+                              <span>Test Slip</span>
+                            </button>
+                            {printer.drawerKickRJ12 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  directPrintService.openCashDrawer(printer.name);
+                                  toast.success(`Drawer kick command sent to ${printer.name}`);
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1.5 bg-cream-50 hover:bg-cream-100 text-brand-brown-dark border border-border/60 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+                                title="Kick Cash Drawer Solenoid"
+                              >
+                                <Coins className="w-3.5 h-3.5 text-amber-600" />
+                                <span>Kick Drawer</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setEditingPrinter(printer)}
+                              className="p-1.5 text-text-secondary hover:text-brand-brown-dark hover:bg-cream-100 rounded-lg transition-all cursor-pointer"
+                              title="Edit Configuration"
+                            >
+                              <Edit2 className="w-4 h-4" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleDeletePrinter(printer.id)}
+                              className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition-all cursor-pointer"
+                              title="Remove Printer Profile"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                       </div>
-
-                      {/* Action buttons */}
-                      <div className="flex items-center justify-between pt-3 border-t border-border/70">
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => handleTestPrint(printer)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-cream-100 hover:bg-cream-200 text-brand-brown-dark rounded-xl text-xs font-bold transition-all cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5" />
-                            <span>Test Slip</span>
-                          </button>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          <button
-                            onClick={() => setEditingPrinter(printer)}
-                            className="p-2 text-text-secondary hover:text-brand-brown-dark hover:bg-cream-100 rounded-xl transition-all cursor-pointer"
-                            title="Edit Configuration"
-                          >
-                            <Edit2 className="w-4 h-4" />
-                          </button>
-
-                          <button
-                            onClick={() => handleDeletePrinter(printer.id)}
-                            className="p-2 text-text-secondary hover:text-status-danger hover:bg-status-danger-bg rounded-xl transition-all cursor-pointer"
-                            title="Delete Printer"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 
@@ -553,81 +790,217 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
             </div>
           )}
 
-          {/* TAB 3: PRINTING RULES */}
+          {/* TAB 3: PRINTING RULES & PREFERENCES */}
           {activeTab === 'SETTINGS' && (
-            <form onSubmit={handleSaveSettings} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <label className="flex items-center gap-3.5 p-4 sm:p-5 bg-cream-50/80 hover:bg-cream-100/80 rounded-2xl sm:rounded-3xl border border-border text-xs font-bold cursor-pointer transition-all">
-                  <input
-                    type="checkbox"
-                    checked={settings.autoPrintReceipt}
-                    onChange={(e) => setSettings({ ...settings, autoPrintReceipt: e.target.checked })}
-                    className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal"
-                  />
-                  <div>
-                    <div className="text-sm font-extrabold text-brand-brown-dark">Auto-Print Customer Receipt</div>
-                    <div className="text-[11px] text-text-secondary font-normal mt-0.5">
-                      Automatically output thermal receipt after completing payment
+            <form onSubmit={handleSaveSettings} className="space-y-5 select-text max-w-2xl mx-auto">
+              {/* Card 1: Primary Receipt Printer */}
+              <div className="bg-white rounded-2xl border border-border/80 shadow-xs overflow-hidden">
+                <div className="px-5 py-3.5 bg-cream-50/60 border-b border-border/60 flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-brand-teal-light text-brand-teal flex items-center justify-center">
+                      <Printer className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-xs sm:text-sm text-brand-brown-dark">Receipt Printer</h4>
+                      <p className="text-[11px] text-text-secondary">Default printer for customer receipts and cash drawer</p>
                     </div>
                   </div>
-                </label>
 
-                <label className="flex items-center gap-3.5 p-4 sm:p-5 bg-cream-50/80 hover:bg-cream-100/80 rounded-2xl sm:rounded-3xl border border-border text-xs font-bold cursor-pointer transition-all">
-                  <input
-                    type="checkbox"
-                    checked={settings.autoPrintKOT}
-                    onChange={(e) => setSettings({ ...settings, autoPrintKOT: e.target.checked })}
-                    className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal"
-                  />
-                  <div>
-                    <div className="text-sm font-extrabold text-brand-brown-dark">Auto-Print Kitchen Prep Tickets (KOT)</div>
-                    <div className="text-[11px] text-text-secondary font-normal mt-0.5">
-                      Dispatch ticket to Bar/Kitchen/Dessert stations upon order submission
-                    </div>
-                  </div>
-                </label>
-
-                <label className="flex items-center gap-3.5 p-4 sm:p-5 bg-cream-50/80 hover:bg-cream-100/80 rounded-2xl sm:rounded-3xl border border-border text-xs font-bold cursor-pointer transition-all">
-                  <input
-                    type="checkbox"
-                    checked={settings.openDrawerAfterCashSale}
-                    onChange={(e) => setSettings({ ...settings, openDrawerAfterCashSale: e.target.checked })}
-                    className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal"
-                  />
-                  <div>
-                    <div className="text-sm font-extrabold text-brand-brown-dark">Automatic Cash Drawer Solenoid Kick</div>
-                    <div className="text-[11px] text-text-secondary font-normal mt-0.5">
-                      Fire 24V RJ12 solenoid pulse when Cash is tendered
-                    </div>
-                  </div>
-                </label>
-
-                <div className="p-4 sm:p-5 bg-cream-50/80 rounded-2xl sm:rounded-3xl border border-border flex items-center justify-between">
-                  <div>
-                    <label className="text-sm font-extrabold text-brand-brown-dark block">
-                      Receipt Copies to Print
-                    </label>
-                    <span className="text-[11px] text-text-secondary">
-                      Customer copy + Merchant copy
+                  {/* Connection indicator */}
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold ${
+                        agentStatus?.online
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : 'bg-rose-50 text-rose-700 border border-rose-200'
+                      }`}
+                    >
+                      <span className={`w-2 h-2 rounded-full ${agentStatus?.online ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+                      {agentStatus?.online ? 'Connected' : 'Offline'}
                     </span>
+                    <button
+                      type="button"
+                      disabled={isRefreshingAgent}
+                      onClick={() => refreshAgent(true)}
+                      className="p-1 text-text-secondary hover:text-brand-brown-dark rounded-lg transition-all cursor-pointer"
+                      title="Rescan printers"
+                    >
+                      <RotateCw className={`w-3.5 h-3.5 ${isRefreshingAgent ? 'animate-spin text-brand-teal' : ''}`} />
+                    </button>
                   </div>
-                  <select
-                    value={settings.receiptCopies || 1}
-                    onChange={(e) => setSettings({ ...settings, receiptCopies: Number(e.target.value) })}
-                    className="px-3.5 py-2 bg-white border border-border rounded-xl text-xs font-bold text-brand-brown-dark"
-                  >
-                    <option value={1}>1 Copy</option>
-                    <option value={2}>2 Copies (Merchant + Customer)</option>
-                  </select>
+                </div>
+
+                <div className="p-4 sm:p-5 space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* Printer select */}
+                    <div className="sm:col-span-2">
+                      <label className="text-xs font-bold text-brand-brown-dark block mb-1.5">
+                        Selected Device
+                      </label>
+                      <select
+                        value={settings.directPrintPrinterName || 'XP-80C'}
+                        onChange={(e) => setSettings({ ...settings, directPrintPrinterName: e.target.value })}
+                        className="w-full px-3 py-2 bg-cream-50/50 border border-border rounded-xl text-xs font-semibold text-brand-brown-dark focus:border-brand-teal focus:bg-white transition-all cursor-pointer"
+                      >
+                        {detectedPrinters.length > 0 ? (
+                          detectedPrinters.map((prn) => (
+                            <option key={prn.name} value={prn.name}>
+                              {prn.name} {prn.isOnline ? '● Online' : '○ Offline'}
+                            </option>
+                          ))
+                        ) : (
+                          <option value="XP-80C">XP-80C (Thermal)</option>
+                        )}
+                      </select>
+                    </div>
+
+                    {/* Paper width */}
+                    <div>
+                      <label className="text-xs font-bold text-brand-brown-dark block mb-1.5">
+                        Paper Width
+                      </label>
+                      <select
+                        value={settings.directPrintPaperWidthMm || 80}
+                        onChange={(e) => setSettings({ ...settings, directPrintPaperWidthMm: Number(e.target.value) as any })}
+                        className="w-full px-3 py-2 bg-cream-50/50 border border-border rounded-xl text-xs font-semibold text-brand-brown-dark focus:border-brand-teal focus:bg-white transition-all cursor-pointer"
+                      >
+                        <option value={80}>80 mm (Standard)</option>
+                        <option value={58}>58 mm (Compact)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Actions: Test Print & Drawer Kick */}
+                  <div className="flex items-center justify-between pt-3 border-t border-border/60">
+                    <span className="text-xs text-text-secondary">Test Printer &amp; Cash Drawer</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={isTestingDrawer || !agentStatus?.online}
+                        onClick={handleDirectDrawerKick}
+                        className="px-3 py-1.5 bg-white border border-border/80 hover:bg-cream-100 text-brand-brown-dark rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <Coins className="w-3.5 h-3.5 text-amber-600" />
+                        <span>{isTestingDrawer ? 'Opening...' : 'Open Drawer'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={isTestingDirectPrint || !agentStatus?.online}
+                        onClick={handleDirectTestPrint}
+                        className="px-3.5 py-1.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl text-xs font-bold shadow-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 active:scale-95"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>{isTestingDirectPrint ? 'Printing...' : 'Print Test Slip'}</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
-              <div className="pt-3 flex justify-end">
+              {/* Card 2: Print Rules & Automation */}
+              <div className="bg-white rounded-2xl border border-border/80 shadow-xs overflow-hidden">
+                <div className="px-5 py-3.5 bg-cream-50/60 border-b border-border/60">
+                  <h4 className="font-bold text-xs sm:text-sm text-brand-brown-dark">Automation &amp; Behavior</h4>
+                  <p className="text-[11px] text-text-secondary">Configure automatic printing and hardware actions</p>
+                </div>
+
+                <div className="divide-y divide-border/50">
+                  {/* Direct Print Toggle */}
+                  <label className="flex items-center justify-between px-5 py-3 hover:bg-cream-50/40 transition-all cursor-pointer">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Direct Thermal Printing</div>
+                      <div className="text-[11px] text-text-secondary">Print directly without opening the browser dialog</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.directPrintEnabled ?? true}
+                      onChange={(e) => setSettings({ ...settings, directPrintEnabled: e.target.checked })}
+                      className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal cursor-pointer"
+                    />
+                  </label>
+
+                  {/* Auto-print customer receipt */}
+                  <label className="flex items-center justify-between px-5 py-3 hover:bg-cream-50/40 transition-all cursor-pointer">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Auto-Print Receipt on Payment</div>
+                      <div className="text-[11px] text-text-secondary">Output receipt immediately when payment completes</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.autoPrintReceipt}
+                      onChange={(e) => setSettings({ ...settings, autoPrintReceipt: e.target.checked })}
+                      className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal cursor-pointer"
+                    />
+                  </label>
+
+                  {/* Auto-print KOT */}
+                  <label className="flex items-center justify-between px-5 py-3 hover:bg-cream-50/40 transition-all cursor-pointer">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Auto-Print Kitchen Tickets (KOT)</div>
+                      <div className="text-[11px] text-text-secondary">Send prep tickets to kitchen when order is placed</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.autoPrintKOT}
+                      onChange={(e) => setSettings({ ...settings, autoPrintKOT: e.target.checked })}
+                      className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal cursor-pointer"
+                    />
+                  </label>
+
+                  {/* Auto-cut paper */}
+                  <label className="flex items-center justify-between px-5 py-3 hover:bg-cream-50/40 transition-all cursor-pointer">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Auto-Cut Paper</div>
+                      <div className="text-[11px] text-text-secondary">Automatically cut receipt paper after printing</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.directPrintAutoCut ?? true}
+                      onChange={(e) => setSettings({ ...settings, directPrintAutoCut: e.target.checked })}
+                      className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal cursor-pointer"
+                    />
+                  </label>
+
+                  {/* Open drawer on cash */}
+                  <label className="flex items-center justify-between px-5 py-3 hover:bg-cream-50/40 transition-all cursor-pointer">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Open Cash Drawer on Cash Payment</div>
+                      <div className="text-[11px] text-text-secondary">Trigger cash drawer when payment method is Cash</div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={settings.openDrawerAfterCashSale}
+                      onChange={(e) => setSettings({ ...settings, openDrawerAfterCashSale: e.target.checked })}
+                      className="w-4 h-4 rounded text-brand-teal focus:ring-brand-teal cursor-pointer"
+                    />
+                  </label>
+
+                  {/* Receipt copies */}
+                  <div className="flex items-center justify-between px-5 py-3">
+                    <div>
+                      <div className="text-xs font-bold text-brand-brown-dark">Receipt Copies</div>
+                      <div className="text-[11px] text-text-secondary">Number of receipt copies per order</div>
+                    </div>
+                    <select
+                      value={settings.receiptCopies || 1}
+                      onChange={(e) => setSettings({ ...settings, receiptCopies: Number(e.target.value) })}
+                      className="px-3 py-1.5 bg-cream-50/50 border border-border rounded-xl text-xs font-semibold text-brand-brown-dark focus:border-brand-teal cursor-pointer"
+                    >
+                      <option value={1}>1 Copy</option>
+                      <option value={2}>2 Copies (Customer + Store)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* Bottom save bar */}
+              <div className="flex items-center justify-end gap-3 pt-1">
                 <button
                   type="submit"
-                  className="px-6 py-3 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-2xl font-extrabold text-xs shadow-teal transition-all active:scale-95 cursor-pointer"
+                  className="px-6 py-2.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-xl font-bold text-xs shadow-teal transition-all active:scale-95 cursor-pointer"
                 >
-                  Save Printing Preferences
+                  Save Preferences
                 </button>
               </div>
             </form>
@@ -842,7 +1215,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
               </div>
 
               <div className="p-4 bg-cream-100/50">
-                <div className="p-4 bg-white rounded-2xl shadow-inner border border-border font-mono text-[11px] leading-relaxed whitespace-pre select-text text-brand-brown-deep">
+                <div id="printable-test-slip" className="p-4 bg-white rounded-2xl shadow-inner border border-border font-mono text-[11px] leading-relaxed whitespace-pre select-text text-brand-brown-deep">
                   {viewingTestJob.payloadText}
                 </div>
               </div>
@@ -851,7 +1224,7 @@ export const PosPrinterSettingsModal: React.FC<PosPrinterSettingsModalProps> = (
                 <button
                   type="button"
                   onClick={() => {
-                    window.print();
+                    printThermalElement('printable-test-slip');
                   }}
                   className="px-5 py-2 bg-brand-teal text-white rounded-xl text-xs font-extrabold shadow-teal active:scale-95 cursor-pointer hover:bg-brand-teal-dark"
                 >

@@ -511,6 +511,37 @@ CREATE TABLE IF NOT EXISTS public.employees (
 );
 
 -- ----------------------------------------------------------------------------
+-- 23B. ATTENDANCE & TIME CLOCK TABLE (Dedicated Table)
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.attendance (
+    "id" TEXT PRIMARY KEY,
+    "employeeId" TEXT NOT NULL REFERENCES public.employees("id") ON DELETE CASCADE,
+    "employeeName" TEXT,
+    "date" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'PRESENT', -- 'PRESENT' | 'OVERTIME' | 'ABSENT' | 'HOLIDAY' | 'LATE' | 'EARLY_LEAVE'
+    "standardShiftHours" NUMERIC DEFAULT 8,
+    "overtimeHours" NUMERIC DEFAULT 0,
+    "checkInTime" TEXT,
+    "checkOutTime" TEXT,
+    "checkInSignature" TEXT,
+    "checkOutSignature" TEXT,
+    "workedHours" NUMERIC DEFAULT 0,
+    "workedMinutes" INT DEFAULT 0,
+    "overtimeMinutes" INT DEFAULT 0,
+    "earlyLeaveHours" NUMERIC DEFAULT 0,
+    "earlyLeaveMinutes" INT DEFAULT 0,
+    "isLate" BOOLEAN DEFAULT false,
+    "lateMinutes" INT DEFAULT 0,
+    "isEarlyLeave" BOOLEAN DEFAULT false,
+    "earlyMinutes" INT DEFAULT 0,
+    "notes" TEXT,
+    "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+    "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_attendance_emp_date ON public.attendance ("employeeId", "date");
+
+-- ----------------------------------------------------------------------------
 -- 24. EMPLOYEE PAYMENTS (Salaries, Advances, Overtime, Bonuses)
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.employee_payments (
@@ -703,7 +734,7 @@ DECLARE
         'categories', 'modifier_groups', 'suppliers', 'ingredients', 'products',
         'recipes', 'shifts', 'drawer_transactions', 'orders', 'held_orders',
         'customers', 'customer_point_history', 'inventory_movements', 'expenses',
-        'purchases', 'stock_requests', 'employees', 'employee_payments',
+        'purchases', 'stock_requests', 'employees', 'attendance', 'employee_payments',
         'rate_histories', 'loyalty_histories', 'printers', 'printer_jobs', 'audit_logs'
     ];
 BEGIN
@@ -728,7 +759,7 @@ DECLARE
     realtime_tables text[] := ARRAY[
         'orders', 'shifts', 'drawer_transactions', 'inventory_movements',
         'stock_requests', 'held_orders', 'ingredients', 'products',
-        'customers', 'printer_jobs', 'expenses', 'audit_logs'
+        'customers', 'printer_jobs', 'expenses', 'audit_logs', 'attendance'
     ];
 BEGIN
     FOREACH tbl IN ARRAY realtime_tables LOOP
@@ -1064,10 +1095,10 @@ INSERT INTO public.employees (
     "id", "name", "role", "phone", "email", "baseSalaryCents", "payFrequency",
     "overtimeHourlyRateCents", "leaveDailyRateCents", "attendedDays", "bankName", "accountNumber", "active", "notes"
 ) VALUES
-    ('emp_001', 'Chaminda Silva', 'General Manager & Admin', '+94 77 123 4567', 'chaminda@chillandchoc.lk', 12000000, 'MONTHLY', 65000, 460000, 26, 'Commercial Bank of Ceylon', '8001293847', true, 'Store manager and administrator.'),
-    ('emp_002', 'Nimal Perera', 'Head Barista & Cashier', '+94 71 987 6543', 'nimal@chillandchoc.lk', 7500000, 'MONTHLY', 55000, 288000, 24, 'Bank of Ceylon', '0029384756', true, 'Lead coffee barista and shift in-charge.'),
-    ('emp_003', 'Kasun Fernando', 'Cashier & Junior Barista', '+94 76 555 8899', 'kasun@chillandchoc.lk', 5500000, 'MONTHLY', 45000, 211500, 22, 'Sampath Bank', '1004839201', true, 'Morning shift cashier.'),
-    ('emp_004', 'Dilshan Madushanka', 'Kitchen & Stock Assistant', '+94 72 333 4455', NULL, 4500000, 'MONTHLY', 40000, 173000, 25, 'Hatton National Bank (HNB)', '0492837461', true, 'Ingredient prep and stock receiving.')
+    ('emp_001', 'Chaminda Silva', 'General Manager & Admin', '+94 77 123 4567', 'chaminda@chillandchoc.lk', 12000000, 'MONTHLY', 65000, 460000, 0, 'Commercial Bank of Ceylon', '8001293847', true, 'Store manager and administrator.'),
+    ('emp_002', 'Nimal Perera', 'Head Barista & Cashier', '+94 71 987 6543', 'nimal@chillandchoc.lk', 7500000, 'MONTHLY', 55000, 288000, 0, 'Bank of Ceylon', '0029384756', true, 'Lead coffee barista and shift in-charge.'),
+    ('emp_003', 'Kasun Fernando', 'Cashier & Junior Barista', '+94 76 555 8899', 'kasun@chillandchoc.lk', 5500000, 'MONTHLY', 45000, 211500, 0, 'Sampath Bank', '1004839201', true, 'Morning shift cashier.'),
+    ('emp_004', 'Dilshan Madushanka', 'Kitchen & Stock Assistant', '+94 72 333 4455', NULL, 4500000, 'MONTHLY', 40000, 173000, 0, 'Hatton National Bank (HNB)', '0492837461', true, 'Ingredient prep and stock receiving.')
 ON CONFLICT ("id") DO NOTHING;
 
 -- 15. Employee Payments
@@ -1198,6 +1229,48 @@ INSERT INTO public.inventory_movements ("id", "ingredientId", "ingredientName", 
     ('mov_demo_04', 'ing_fresh_milk', 'Fresh Whole Barista Milk', 'SALE_CONSUMPTION', -4.8, 'L', 264000, 'POS orders automatic usage', now() - interval '1 hour')
 ON CONFLICT ("id") DO NOTHING;
 
+-- ----------------------------------------------------------------------------
+-- 25. SUPABASE STORAGE: PRODUCTS BUCKET & RLS POLICIES
+-- ----------------------------------------------------------------------------
+-- Create products bucket for menu product images (5MB limit)
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'products',
+  'products',
+  true,
+  5242880,
+  ARRAY['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml']
+)
+ON CONFLICT (id) DO UPDATE SET public = true;
+
+-- Drop existing policies if any
+DROP POLICY IF EXISTS "Public Read Products Storage" ON storage.objects;
+DROP POLICY IF EXISTS "Public Upload Products Storage" ON storage.objects;
+DROP POLICY IF EXISTS "Public Update Products Storage" ON storage.objects;
+DROP POLICY IF EXISTS "Public Delete Products Storage" ON storage.objects;
+
+-- Enable public CRUD access so images can be uploaded and deleted directly from the app
+CREATE POLICY "Public Read Products Storage"
+ON storage.objects FOR SELECT
+TO public
+USING (bucket_id = 'products');
+
+CREATE POLICY "Public Upload Products Storage"
+ON storage.objects FOR INSERT
+TO public
+WITH CHECK (bucket_id = 'products');
+
+CREATE POLICY "Public Update Products Storage"
+ON storage.objects FOR UPDATE
+TO public
+USING (bucket_id = 'products');
+
+CREATE POLICY "Public Delete Products Storage"
+ON storage.objects FOR DELETE
+TO public
+USING (bucket_id = 'products');
+
 -- ============================================================================
 -- END OF SUPABASE INITIALIZATION SCRIPT
 -- ============================================================================
+

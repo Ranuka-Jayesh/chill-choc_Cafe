@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation, Navigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/useAuthStore';
 import { confirmDialog } from '@/store/useConfirmStore';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
+import { db } from '@/services/storage/db';
 import { BrandLogo } from '@/components/brand/BrandLogo';
 import { BrandFooter } from '@/components/brand/BrandFooter';
 import { toast } from 'sonner';
@@ -32,12 +33,14 @@ import {
   ChevronRight,
   Clock,
   Calendar,
+  Database,
 } from 'lucide-react';
 
 interface NavItem {
   label: string;
   to: string;
   icon: React.ReactNode;
+  badgeCount?: number;
 }
 
 interface NavSection {
@@ -58,10 +61,42 @@ export const AdminLayout: React.FC = () => {
   // Real-time live date and time state
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
 
+  // Pending Cashier Stock Requests & Cash Drawer Requests Counts
+  const [pendingStockCount, setPendingStockCount] = useState<number>(() => {
+    return (db.getSnapshot().stockRequests || []).filter((r) => r.status === 'PENDING_APPROVAL').length;
+  });
+
+  const [pendingDrawerCount, setPendingDrawerCount] = useState<number>(() => {
+    return (db.getSnapshot().drawerTransactions || []).filter((t) => t.status === 'PENDING_APPROVAL').length;
+  });
+
   useEffect(() => {
     const timer = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
+
+    const updatePendingCounts = () => {
+      const snap = db.getSnapshot();
+      const sCount = (snap.stockRequests || []).filter((r) => r.status === 'PENDING_APPROVAL').length;
+      const dCount = (snap.drawerTransactions || []).filter((t) => t.status === 'PENDING_APPROVAL').length;
+      setPendingStockCount(sCount);
+      setPendingDrawerCount(dCount);
+    };
+
+    const unsubDb = db.subscribe(updatePendingCounts);
+    const unsubStockPending = realtimeSocketService.on('STOCK_REQUEST_PENDING', updatePendingCounts);
+    const unsubStockApproved = realtimeSocketService.on('STOCK_REQUEST_APPROVED', updatePendingCounts);
+    const unsubStockRejected = realtimeSocketService.on('STOCK_REQUEST_REJECTED', updatePendingCounts);
+    const unsubDrawerPending = realtimeSocketService.on('DRAWER_REQUEST_PENDING', updatePendingCounts);
+    const unsubDrawerApproved = realtimeSocketService.on('DRAWER_REQUEST_APPROVED', updatePendingCounts);
+    const unsubDrawerRejected = realtimeSocketService.on('DRAWER_REQUEST_REJECTED', updatePendingCounts);
+
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key?.includes('cafemm') || e.key?.includes('stock') || e.key?.includes('drawer')) {
+        updatePendingCounts();
+      }
+    };
+    window.addEventListener('storage', handleStorage);
 
     const unsubOrder = realtimeSocketService.on('ORDER_CREATED', (msg) => {
       const order = msg.payload?.order;
@@ -75,13 +110,20 @@ export const AdminLayout: React.FC = () => {
 
     return () => {
       clearInterval(timer);
+      unsubDb();
+      unsubStockPending();
+      unsubStockApproved();
+      unsubStockRejected();
+      unsubDrawerPending();
+      unsubDrawerApproved();
+      unsubDrawerRejected();
+      window.removeEventListener('storage', handleStorage);
       unsubOrder();
     };
   }, []);
 
   if (!session) {
-    navigate('/admin/login');
-    return null;
+    return <Navigate to="/admin/login" replace />;
   }
 
   const toggleCollapse = () => {
@@ -124,13 +166,23 @@ export const AdminLayout: React.FC = () => {
     {
       title: 'Inventory',
       items: [
-        { label: 'Stock & Purchases', to: '/admin/inventory', icon: <Boxes className="w-4 h-4" /> },
+        {
+          label: 'Stock & Purchases',
+          to: '/admin/inventory',
+          icon: <Boxes className="w-4 h-4" />,
+          badgeCount: pendingStockCount,
+        },
       ],
     },
     {
       title: 'Finance',
       items: [
-        { label: 'Cash Drawers', to: '/admin/cash-drawers', icon: <Coins className="w-4 h-4" /> },
+        {
+          label: 'Cash Drawers',
+          to: '/admin/cash-drawers',
+          icon: <Coins className="w-4 h-4" />,
+          badgeCount: pendingDrawerCount,
+        },
         { label: 'Accounting', to: '/admin/accounting', icon: <Calculator className="w-4 h-4" /> },
         { label: 'Reports & Analytics', to: '/admin/reports', icon: <BarChart3 className="w-4 h-4" /> },
       ],
@@ -217,35 +269,72 @@ export const AdminLayout: React.FC = () => {
               {isCollapsed && !isMobileMenuOpen && sIdx > 0 && (
                 <div className="my-2 border-t border-white/10 mx-2" />
               )}
-              {section.items.map((item, iIdx) => (
-                <NavLink
-                  key={iIdx}
-                  to={item.to}
-                  onClick={() => setIsMobileMenuOpen(false)}
-                  title={isCollapsed ? item.label : undefined}
-                  className={({ isActive }) =>
-                    `group relative flex items-center ${
-                      isCollapsed && !isMobileMenuOpen ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2'
-                    } rounded-xl text-xs font-semibold transition-all duration-150 ${
-                      isActive
-                        ? 'bg-[#1FB5AE] text-white font-bold shadow-md shadow-[#1FB5AE]/20'
-                        : 'text-[#D3C7BF] hover:bg-white/8 hover:text-white'
-                    }`
-                  }
-                >
-                  <span className="shrink-0">{item.icon}</span>
-                  {(!isCollapsed || isMobileMenuOpen) && (
-                    <span className="truncate">{item.label}</span>
-                  )}
+              {section.items.map((item, iIdx) => {
+                const count = item.badgeCount || 0;
+                const hasBadge = count > 0;
 
-                  {/* Floating tooltip for collapsed view */}
-                  {isCollapsed && !isMobileMenuOpen && (
-                    <div className="fixed left-[76px] hidden group-hover:flex items-center px-2.5 py-1 bg-[#1A100C] text-white text-[11px] font-bold rounded-md shadow-xl border border-white/10 whitespace-nowrap z-50 pointer-events-none">
-                      {item.label}
-                    </div>
-                  )}
-                </NavLink>
-              ))}
+                return (
+                  <NavLink
+                    key={iIdx}
+                    to={item.to}
+                    onClick={() => setIsMobileMenuOpen(false)}
+                    title={isCollapsed ? item.label : undefined}
+                    className={({ isActive }) =>
+                      `group relative flex items-center ${
+                        isCollapsed && !isMobileMenuOpen ? 'justify-center px-0 py-2.5' : 'gap-3 px-3 py-2'
+                      } rounded-xl text-xs font-semibold transition-all duration-150 ${
+                        isActive
+                          ? 'bg-[#1FB5AE] text-white font-bold shadow-md shadow-[#1FB5AE]/20'
+                          : 'text-[#D3C7BF] hover:bg-white/8 hover:text-white'
+                      }`
+                    }
+                  >
+                    <span className="shrink-0 relative flex items-center justify-center">
+                      {item.icon}
+                      {/* Collapsed view badge indicator (perfect circle, no blinking) */}
+                      {isCollapsed && !isMobileMenuOpen && hasBadge && (
+                        <span
+                          className={`absolute -top-1.5 -right-2 ${
+                            count > 9 ? 'min-w-[16px] h-4 px-1 rounded-full' : 'w-4 h-4 rounded-full'
+                          } text-[9px] font-black bg-[#E99343] text-[#251814] flex items-center justify-center shadow-xs leading-none`}
+                        >
+                          {count}
+                        </span>
+                      )}
+                    </span>
+                    {(!isCollapsed || isMobileMenuOpen) && (
+                      <>
+                        <span className="truncate flex-1">{item.label}</span>
+                        {hasBadge && (
+                          <span
+                            className={`ml-auto ${
+                              count > 9 ? 'min-w-[20px] h-5 px-1.5 rounded-full' : 'w-5 h-5 rounded-full'
+                            } text-[10px] font-black bg-[#E99343] text-[#251814] flex items-center justify-center shadow-xs shrink-0 leading-none`}
+                          >
+                            {count}
+                          </span>
+                        )}
+                      </>
+                    )}
+
+                    {/* Floating tooltip for collapsed view */}
+                    {isCollapsed && !isMobileMenuOpen && (
+                      <div className="fixed left-[76px] hidden group-hover:flex items-center gap-1.5 px-2.5 py-1 bg-[#1A100C] text-white text-[11px] font-bold rounded-md shadow-xl border border-white/10 whitespace-nowrap z-50 pointer-events-none">
+                        <span>{item.label}</span>
+                        {hasBadge && (
+                          <span
+                            className={`${
+                              count > 9 ? 'min-w-[16px] h-4 px-1 rounded-full' : 'w-4 h-4 rounded-full'
+                            } text-[9px] font-black bg-[#E99343] text-[#251814] flex items-center justify-center leading-none`}
+                          >
+                            {count}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </NavLink>
+                );
+              })}
             </div>
           ))}
         </nav>
@@ -325,7 +414,7 @@ export const AdminLayout: React.FC = () => {
             </div>
           </div>
 
-          {/* Real-time Big Font Date & Time (Pure Seamless Minimalist) */}
+          {/* Top Bar Right: Clock */}
           <div className="flex items-center gap-2.5 sm:gap-3 select-none">
             <span className="text-xs sm:text-sm font-bold text-text-secondary whitespace-nowrap">
               {dateString}

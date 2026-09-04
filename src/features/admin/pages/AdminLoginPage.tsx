@@ -12,6 +12,7 @@ export const AdminLoginPage: React.FC = () => {
   const [pin, setPin] = useState<string>('');
   const [errorShake, setErrorShake] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef(false);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -20,22 +21,26 @@ export const AdminLoginPage: React.FC = () => {
   const attemptLogin = useCallback(
     async (pinCode: string) => {
       if (!pinCode || pinCode.length < 4) {
-        toast.error('Please enter a 4-digit PIN');
+        toast.error('Please enter a 4-digit PIN', { id: 'admin-pin-auth' });
         return;
       }
+      if (isSubmittingRef.current || isLoading) return;
+      isSubmittingRef.current = true;
       try {
         await loginByPin(pinCode, 'ADMIN', 'BACKOFFICE');
-        toast.success('Administrator authenticated successfully.');
+        toast.success('Administrator authenticated successfully.', { id: 'admin-pin-auth' });
         navigate('/admin/dashboard');
       } catch (err: any) {
         setErrorShake(true);
         setTimeout(() => setErrorShake(false), 500);
-        toast.error(err.message || 'Invalid Administrator PIN');
+        toast.error(err.message || 'Invalid Administrator PIN', { id: 'admin-pin-auth' });
         setPin('');
         inputRef.current?.focus();
+      } finally {
+        isSubmittingRef.current = false;
       }
     },
-    [loginByPin, navigate]
+    [loginByPin, isLoading, navigate]
   );
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {

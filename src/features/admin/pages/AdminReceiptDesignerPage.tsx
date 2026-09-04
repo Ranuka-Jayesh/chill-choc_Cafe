@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '@/services/storage/db';
+import { settingsService } from '@/services/settingsService';
 import { ReceiptCustomizationSettings, KotCustomizationSettings, SystemSettings } from '@/types';
 import { receiptSocketService } from '@/services/receiptSocketService';
 import { formatLKR, formatDateTime } from '@/utils/format';
@@ -7,6 +8,7 @@ import {
   Printer,
   RefreshCw,
   Save,
+  Loader2,
   Image as ImageIcon,
   Sliders,
   Type,
@@ -26,6 +28,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { printThermalElement } from '@/utils/printThermal';
 
 // Sample mock orders for live preview
 const SAMPLE_ORDERS = [
@@ -134,6 +137,9 @@ export const AdminReceiptDesignerPage: React.FC = () => {
     logoUrl: '/logobg.webp',
     logoWidthPx: 95,
     logoAlignment: 'center',
+    logoOffsetYPx: 0,
+    logoMarginTopPx: 0,
+    logoMarginBottomPx: 10,
     businessName: systemSettings.businessName || 'Chill & Choc',
     tagline: systemSettings.tagline || 'Cool Vibes, Sweet Bites',
     address: systemSettings.address || 'No. 42, Galle Road, Colombo 03, Sri Lanka',
@@ -146,6 +152,13 @@ export const AdminReceiptDesignerPage: React.FC = () => {
     paperWidthMm: 80,
     fontFamily: 'mono',
     fontSize: 'normal',
+    heading1Size: 'large',
+    heading1Bold: true,
+    heading2Size: 'normal',
+    heading2Bold: true,
+    heading3Size: 'normal',
+    heading3Bold: true,
+    bodyBold: false,
     showOrderNumber: true,
     orderNumberPrefix: 'Order: #',
     showOrderType: true,
@@ -204,20 +217,29 @@ export const AdminReceiptDesignerPage: React.FC = () => {
     customNote: '',
   }), [systemSettings]);
 
-  // Form states
-  const [receiptForm, setReceiptForm] = useState<ReceiptCustomizationSettings>(
-    () => systemSettings.receiptCustomization || defaultReceiptCustomization
-  );
-  const [savedReceiptForm, setSavedReceiptForm] = useState<ReceiptCustomizationSettings>(
-    () => systemSettings.receiptCustomization || defaultReceiptCustomization
-  );
+  // Form states with merged defaults so newly added fields like logoOffsetYPx persist reliably
+  const initialReceiptSettings = useMemo<ReceiptCustomizationSettings>(() => {
+    const fromDb = systemSettings.receiptCustomization;
+    return {
+      ...defaultReceiptCustomization,
+      ...(fromDb || {}),
+    };
+  }, [systemSettings, defaultReceiptCustomization]);
 
-  const [kotForm, setKotForm] = useState<KotCustomizationSettings>(
-    () => systemSettings.kotCustomization || defaultKotCustomization
-  );
-  const [savedKotForm, setSavedKotForm] = useState<KotCustomizationSettings>(
-    () => systemSettings.kotCustomization || defaultKotCustomization
-  );
+  const initialKotSettings = useMemo<KotCustomizationSettings>(() => {
+    const fromDb = systemSettings.kotCustomization;
+    return {
+      ...defaultKotCustomization,
+      ...(fromDb || {}),
+    };
+  }, [systemSettings, defaultKotCustomization]);
+
+  const [receiptForm, setReceiptForm] = useState<ReceiptCustomizationSettings>(initialReceiptSettings);
+  const [savedReceiptForm, setSavedReceiptForm] = useState<ReceiptCustomizationSettings>(initialReceiptSettings);
+
+  const [kotForm, setKotForm] = useState<KotCustomizationSettings>(initialKotSettings);
+  const [savedKotForm, setSavedKotForm] = useState<KotCustomizationSettings>(initialKotSettings);
+  const [isSaving, setIsSaving] = useState(false);
 
   const hasUnsavedChanges = useMemo(() => {
     if (documentMode === 'receipt') {
@@ -226,28 +248,97 @@ export const AdminReceiptDesignerPage: React.FC = () => {
     return JSON.stringify(kotForm) !== JSON.stringify(savedKotForm);
   }, [documentMode, receiptForm, savedReceiptForm, kotForm, savedKotForm]);
 
-  // Real-time broadcast whenever receipt form changes
+  // Keep a ref of dirty state so background DB fetches do NOT wipe out an admin's draft
+  const isDirtyRef = React.useRef(false);
+  isDirtyRef.current = hasUnsavedChanges;
+
+  // Auto-save draft to local database if user refreshes the page so it's never lost
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (isDirtyRef.current) {
+        db.update('settings', (prev) => ({
+          ...prev,
+          receiptCustomization: receiptForm,
+          kotCustomization: kotForm,
+        }));
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [receiptForm, kotForm]);
+
+  // Sync state on remote DB load if user has not started modifying
+  useEffect(() => {
+    const unsub = db.subscribe(() => {
+      if (isDirtyRef.current) return;
+      const snap = db.getSnapshot().settings;
+      if (snap.receiptCustomization) {
+        const merged = {
+          ...defaultReceiptCustomization,
+          ...snap.receiptCustomization,
+        };
+        setReceiptForm(merged);
+        setSavedReceiptForm(merged);
+      }
+      if (snap.kotCustomization) {
+        const mergedKot = {
+          ...defaultKotCustomization,
+          ...snap.kotCustomization,
+        };
+        setKotForm(mergedKot);
+        setSavedKotForm(mergedKot);
+      }
+    });
+    return () => unsub();
+  }, [defaultReceiptCustomization, defaultKotCustomization]);
+
+  // Update local receipt form draft (updates preview instantly, does NOT push to DB until Save is clicked)
   const updateReceiptForm = (changes: Partial<ReceiptCustomizationSettings>) => {
-    const updated = { ...receiptForm, ...changes };
-    setReceiptForm(updated);
-    receiptSocketService.broadcastReceiptUpdate(updated, 'Admin Receipt Studio');
+    setReceiptForm((prev) => ({ ...prev, ...changes }));
   };
 
-  // Real-time broadcast whenever KOT form changes
+  // Update local KOT form draft (updates preview instantly, does NOT push to DB until Save is clicked)
   const updateKotForm = (changes: Partial<KotCustomizationSettings>) => {
-    const updated = { ...kotForm, ...changes };
-    setKotForm(updated);
-    receiptSocketService.broadcastKotUpdate(updated, 'Admin KOT Studio');
+    setKotForm((prev) => ({ ...prev, ...changes }));
   };
 
   const handleLogoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
-        updateReceiptForm({ logoUrl: reader.result });
-        toast.success('Custom café logo uploaded successfully');
+        const rawData = reader.result;
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 400;
+          let width = img.width;
+          let height = img.height;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, width, height);
+            const optimizedBase64 = canvas.toDataURL('image/png', 0.9);
+            updateReceiptForm({ logoUrl: optimizedBase64 });
+            toast.success('Custom café logo uploaded and optimized for thermal printing');
+          } else {
+            updateReceiptForm({ logoUrl: rawData });
+            toast.success('Custom café logo uploaded successfully');
+          }
+        };
+        img.src = rawData;
       }
     };
     reader.readAsDataURL(file);
@@ -263,21 +354,42 @@ export const AdminReceiptDesignerPage: React.FC = () => {
     }
   };
 
-  const handleManualSave = (e?: React.FormEvent) => {
+  const handleManualSave = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (documentMode === 'receipt') {
-      receiptSocketService.broadcastReceiptUpdate(receiptForm, 'Admin Manual Save');
-      setSavedReceiptForm(receiptForm);
-      toast.success('Customer receipt template saved & synced over WebSocket!');
-    } else {
-      receiptSocketService.broadcastKotUpdate(kotForm, 'Admin Manual Save');
-      setSavedKotForm(kotForm);
-      toast.success('Kitchen Order Ticket (KOT) template saved & synced over WebSocket!');
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      if (documentMode === 'receipt') {
+        const result = await settingsService.saveReceiptCustomization(receiptForm);
+        if (!result.success) {
+          toast.error(`Database save error: ${result.error || 'Could not save receipt'}`);
+          return;
+        }
+        setSavedReceiptForm(receiptForm);
+        toast.success('Receipt template saved to database & synced to Cashier in real-time!', {
+          icon: '🖨️',
+        });
+      } else {
+        const result = await settingsService.saveKotCustomization(kotForm);
+        if (!result.success) {
+          toast.error(`Database save error: ${result.error || 'Could not save KOT'}`);
+          return;
+        }
+        setSavedKotForm(kotForm);
+        toast.success('KOT template saved to database & synced to Kitchen in real-time!', {
+          icon: '👨‍🍳',
+        });
+      }
+    } catch (err: any) {
+      toast.error(`Failed to save: ${err?.message || 'Database error occurred'}`);
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleTestPrint = () => {
-    window.print();
+    const targetId = documentMode === 'receipt' ? 'printable-receipt' : 'printable-kot';
+    printThermalElement(targetId);
     toast.success(`Dispatched test ${documentMode === 'receipt' ? 'customer receipt' : 'KOT ticket'} slip.`);
   };
 
@@ -296,6 +408,49 @@ export const AdminReceiptDesignerPage: React.FC = () => {
       default:
         return 'border-b border-dashed border-zinc-400';
     }
+  };
+
+  // Heading 1 (Store Name) Size & Bold
+  const getHeading1Class = () => {
+    const size =
+      receiptForm.heading1Size === 'small'
+        ? 'text-sm sm:text-base'
+        : receiptForm.heading1Size === 'large'
+        ? 'text-lg sm:text-xl'
+        : receiptForm.heading1Size === 'xlarge'
+        ? 'text-xl sm:text-2xl'
+        : 'text-base sm:text-lg';
+    const weight = receiptForm.heading1Bold !== false ? 'font-black' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  // Heading 2 (Order # & Section Headers: Items, Totals, Payment) Size & Bold
+  const getHeading2Class = () => {
+    const size =
+      receiptForm.heading2Size === 'small'
+        ? 'text-[11px]'
+        : receiptForm.heading2Size === 'large'
+        ? 'text-sm'
+        : 'text-xs';
+    const weight = receiptForm.heading2Bold !== false ? 'font-black' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  // Heading 3 (Line Item Names & Table #) Size & Bold
+  const getHeading3Class = () => {
+    const size =
+      receiptForm.heading3Size === 'small'
+        ? 'text-[11px]'
+        : receiptForm.heading3Size === 'large'
+        ? 'text-[13px]'
+        : 'text-xs';
+    const weight = receiptForm.heading3Bold !== false ? 'font-bold' : 'font-normal';
+    return `${size} ${weight}`;
+  };
+
+  // Body weight (item notes, modifier prices, meta info)
+  const getBodyWeightClass = () => {
+    return receiptForm.bodyBold ? 'font-bold' : 'font-normal';
   };
 
   // Helper for divider lines in KOT
@@ -461,12 +616,26 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                           <div>
                             <div className="flex justify-between items-center text-[11px] font-bold uppercase text-text-secondary">
                               <span>Logo Width</span>
-                              <span className="font-mono text-brand-teal">{receiptForm.logoWidthPx}px</span>
+                              <div className="flex items-center gap-1 font-mono text-brand-teal">
+                                <input
+                                  type="number"
+                                  min="40"
+                                  max="300"
+                                  value={receiptForm.logoWidthPx}
+                                  onChange={(e) =>
+                                    updateReceiptForm({
+                                      logoWidthPx: Math.min(300, Math.max(30, Number(e.target.value) || 40)),
+                                    })
+                                  }
+                                  className="w-16 px-1.5 py-0.5 text-right font-mono font-bold text-xs bg-cream-50 border border-border rounded-lg text-brand-brown-dark"
+                                />
+                                <span className="text-[10px] text-text-muted">px</span>
+                              </div>
                             </div>
                             <input
                               type="range"
-                              min="50"
-                              max="160"
+                              min="40"
+                              max="280"
                               step="5"
                               value={receiptForm.logoWidthPx}
                               onChange={(e) => updateReceiptForm({ logoWidthPx: Number(e.target.value) })}
@@ -495,6 +664,60 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                                 Left
                               </button>
                             </div>
+                          </div>
+                        </div>
+
+                        {/* Single-Line Center-Origin Logo Up/Down Slider */}
+                        <div className="pt-2 border-t border-border/70 space-y-1.5">
+                          <div className="flex justify-between items-center text-[11px] font-bold uppercase text-text-secondary">
+                            <span className="flex items-center gap-1.5">
+                              <span>Logo Position (Up / Down)</span>
+                              <span className="text-[10px] text-text-muted lowercase font-normal">(center is default)</span>
+                            </span>
+                            <div className="flex items-center gap-2">
+                              {(receiptForm.logoOffsetYPx ?? 0) !== 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => updateReceiptForm({ logoOffsetYPx: 0 })}
+                                  className="text-[10.5px] font-bold text-brand-teal hover:underline cursor-pointer"
+                                  title="Reset logo to center default position"
+                                >
+                                  Reset Center
+                                </button>
+                              )}
+                              <div className="flex items-center gap-1 font-mono text-brand-teal bg-cream-50 px-2.5 py-0.5 rounded-lg border border-border">
+                                <span className="font-extrabold text-xs">
+                                  {(receiptForm.logoOffsetYPx ?? 0) > 0
+                                    ? `+${receiptForm.logoOffsetYPx} px (Up)`
+                                    : (receiptForm.logoOffsetYPx ?? 0) < 0
+                                    ? `${receiptForm.logoOffsetYPx} px (Down)`
+                                    : '0 px (Center)'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="relative py-1">
+                            {/* Center Guideline Indicator */}
+                            <div
+                              className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-1 h-3.5 bg-zinc-400/80 rounded-full pointer-events-none z-10"
+                              title="Center (0px Default)"
+                            />
+                            <input
+                              type="range"
+                              min="-40"
+                              max="40"
+                              step="2"
+                              value={receiptForm.logoOffsetYPx ?? 0}
+                              onChange={(e) => updateReceiptForm({ logoOffsetYPx: Number(e.target.value) })}
+                              className="w-full accent-brand-teal cursor-pointer"
+                            />
+                          </div>
+
+                          <div className="flex justify-between items-center text-[10px] font-bold mt-0.5 px-0.5">
+                            <span className="text-amber-700">← Move Down (Left)</span>
+                            <span className="text-zinc-500 font-extrabold">● Center (0px)</span>
+                            <span className="text-brand-teal">Move Up (Right) →</span>
                           </div>
                         </div>
 
@@ -627,12 +850,13 @@ export const AdminReceiptDesignerPage: React.FC = () => {
 
               {/* RECEIPT TAB 3: LAYOUT & FONT */}
               {receiptTab === 'items' && (
-                <div className="bg-white p-5 sm:p-7 rounded-3xl border border-border shadow-soft space-y-4 animate-in fade-in duration-150">
+                <div className="bg-white p-5 sm:p-7 rounded-3xl border border-border shadow-soft space-y-6 animate-in fade-in duration-150">
                   <div className="font-black text-sm text-brand-brown-dark border-b border-border pb-3 flex items-center gap-2">
                     <Type className="w-4 h-4 text-brand-teal" />
                     <span>Receipt Paper & Typography Layout</span>
                   </div>
 
+                  {/* 1. Paper Width & Divider Style */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label className="text-xs font-bold uppercase text-text-secondary">Paper Width</label>
@@ -641,7 +865,9 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                           type="button"
                           onClick={() => updateReceiptForm({ paperWidthMm: 80 })}
                           className={`py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${
-                            receiptForm.paperWidthMm === 80 ? 'bg-brand-teal text-white border-brand-teal shadow-xs' : 'bg-cream-50 border-border text-text-secondary'
+                            receiptForm.paperWidthMm === 80
+                              ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                              : 'bg-cream-50 border-border text-text-secondary hover:bg-cream-100'
                           }`}
                         >
                           80mm (Standard)
@@ -650,7 +876,9 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                           type="button"
                           onClick={() => updateReceiptForm({ paperWidthMm: 58 })}
                           className={`py-2 text-xs font-bold rounded-xl border transition-all cursor-pointer ${
-                            receiptForm.paperWidthMm === 58 ? 'bg-brand-teal text-white border-brand-teal shadow-xs' : 'bg-cream-50 border-border text-text-secondary'
+                            receiptForm.paperWidthMm === 58
+                              ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                              : 'bg-cream-50 border-border text-text-secondary hover:bg-cream-100'
                           }`}
                         >
                           58mm (Narrow)
@@ -670,6 +898,247 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                         <option value="solid">Solid Thin Line</option>
                         <option value="double">Double Solid Line</option>
                       </select>
+                    </div>
+                  </div>
+
+                  {/* 2. Font Family (Typeface) */}
+                  <div className="p-4 sm:p-5 rounded-2xl bg-cream-50/80 border border-border space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-black text-brand-brown-dark">Bill Font Style (Typeface)</label>
+                      <span className="text-[10.5px] font-mono text-brand-teal font-bold uppercase">
+                        {receiptForm.fontFamily === 'courier' ? 'Courier New' : receiptForm.fontFamily === 'sans' ? 'Modern Sans' : 'Thermal Monospace'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => updateReceiptForm({ fontFamily: 'mono' })}
+                        className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                          receiptForm.fontFamily === 'mono'
+                            ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                            : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                        }`}
+                      >
+                        <div className="text-xs font-mono font-bold">Monospace</div>
+                        <div className="text-[9.5px] opacity-80 mt-0.5">Classic Thermal</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => updateReceiptForm({ fontFamily: 'courier' })}
+                        className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                          receiptForm.fontFamily === 'courier'
+                            ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                            : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                        }`}
+                      >
+                        <div className="text-xs font-serif font-bold">Courier</div>
+                        <div className="text-[9.5px] opacity-80 mt-0.5">Retro Typewriter</div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => updateReceiptForm({ fontFamily: 'sans' })}
+                        className={`p-2.5 rounded-xl border text-center transition-all cursor-pointer ${
+                          receiptForm.fontFamily === 'sans'
+                            ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                            : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                        }`}
+                      >
+                        <div className="text-xs font-sans font-bold">Sans-Serif</div>
+                        <div className="text-[9.5px] opacity-80 mt-0.5">Modern Crisp</div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* 3. Heading 1 (Store Name) Size & Bold Controls */}
+                  <div className="p-4 sm:p-5 rounded-2xl bg-cream-50/80 border border-border space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs font-black text-brand-brown-dark">Heading 1: Store / Café Name</div>
+                        <div className="text-[10px] text-text-secondary">Main branding header at top of bill</div>
+                      </div>
+                      {/* Bold / Not Bold Toggle */}
+                      <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-border">
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading1Bold: true })}
+                          className={`px-3 py-1 text-xs font-black rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading1Bold !== false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Bold
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading1Bold: false })}
+                          className={`px-3 py-1 text-xs font-normal rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading1Bold === false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Not Bold
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Size Selector */}
+                    <div className="grid grid-cols-4 gap-2">
+                      {(['small', 'normal', 'large', 'xlarge'] as const).map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading1Size: sz })}
+                          className={`py-1.5 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center capitalize ${
+                            (receiptForm.heading1Size || 'large') === sz
+                              ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                              : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                          }`}
+                        >
+                          {sz === 'xlarge' ? 'XL (22px)' : sz === 'large' ? 'Large (18px)' : sz === 'normal' ? 'Normal (16px)' : 'Small (14px)'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 4. Heading 2 (Order # & Section Titles) Size & Bold Controls */}
+                  <div className="p-4 sm:p-5 rounded-2xl bg-cream-50/80 border border-border space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs font-black text-brand-brown-dark">Heading 2: Order # & Section Titles</div>
+                        <div className="text-[10px] text-text-secondary">Order reference, ITEM header, and summary titles</div>
+                      </div>
+                      {/* Bold / Not Bold Toggle */}
+                      <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-border">
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading2Bold: true })}
+                          className={`px-3 py-1 text-xs font-black rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading2Bold !== false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Bold
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading2Bold: false })}
+                          className={`px-3 py-1 text-xs font-normal rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading2Bold === false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Not Bold
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Size Selector */}
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['small', 'normal', 'large'] as const).map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading2Size: sz })}
+                          className={`py-1.5 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center capitalize ${
+                            (receiptForm.heading2Size || 'normal') === sz
+                              ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                              : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                          }`}
+                        >
+                          {sz === 'large' ? 'Large (15px)' : sz === 'normal' ? 'Normal (13px)' : 'Small (11px)'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 5. Heading 3 (Line Item Names & Table Number) Size & Bold Controls */}
+                  <div className="p-4 sm:p-5 rounded-2xl bg-cream-50/80 border border-border space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="text-xs font-black text-brand-brown-dark">Heading 3: Item Names & Table Number</div>
+                        <div className="text-[10px] text-text-secondary">Purchased item labels and table indicators</div>
+                      </div>
+                      {/* Bold / Not Bold Toggle */}
+                      <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-border">
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading3Bold: true })}
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading3Bold !== false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Bold
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading3Bold: false })}
+                          className={`px-3 py-1 text-xs font-normal rounded-lg transition-all cursor-pointer ${
+                            receiptForm.heading3Bold === false
+                              ? 'bg-brand-brown-dark text-white shadow-xs'
+                              : 'text-text-secondary hover:text-brand-brown-dark'
+                          }`}
+                        >
+                          Not Bold
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Size Selector */}
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['small', 'normal', 'large'] as const).map((sz) => (
+                        <button
+                          key={sz}
+                          type="button"
+                          onClick={() => updateReceiptForm({ heading3Size: sz })}
+                          className={`py-1.5 px-2 rounded-xl text-xs font-bold border transition-all cursor-pointer text-center capitalize ${
+                            (receiptForm.heading3Size || 'normal') === sz
+                              ? 'bg-brand-teal text-white border-brand-teal shadow-xs'
+                              : 'bg-white border-border text-text-secondary hover:bg-cream-100'
+                          }`}
+                        >
+                          {sz === 'large' ? 'Large (14px)' : sz === 'normal' ? 'Normal (12px)' : 'Small (11px)'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 6. Body & Item Details Weight Toggle */}
+                  <div className="p-4 rounded-2xl bg-cream-50/80 border border-border flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-black text-brand-brown-dark">Prices & Details Text Weight</div>
+                      <div className="text-[10px] text-text-secondary">Item notes, unit prices, and payment breakdown</div>
+                    </div>
+                    <div className="flex items-center gap-1 bg-white p-1 rounded-xl border border-border">
+                      <button
+                        type="button"
+                        onClick={() => updateReceiptForm({ bodyBold: true })}
+                        className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                          receiptForm.bodyBold
+                            ? 'bg-brand-brown-dark text-white shadow-xs'
+                            : 'text-text-secondary hover:text-brand-brown-dark'
+                        }`}
+                      >
+                        Bold
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateReceiptForm({ bodyBold: false })}
+                        className={`px-3 py-1 text-xs font-normal rounded-lg transition-all cursor-pointer ${
+                          !receiptForm.bodyBold
+                            ? 'bg-brand-brown-dark text-white shadow-xs'
+                            : 'text-text-secondary hover:text-brand-brown-dark'
+                        }`}
+                      >
+                        Not Bold
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1194,6 +1663,7 @@ export const AdminReceiptDesignerPage: React.FC = () => {
               {/* =================================================================== */}
               {documentMode === 'receipt' && (
                 <div
+                  id="printable-receipt"
                   style={{
                     maxWidth: receiptForm.paperWidthMm === 58 ? '270px' : '340px',
                     fontFamily:
@@ -1207,12 +1677,19 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                 >
                   {/* 1. Logo Header */}
                   {receiptForm.showLogo && receiptForm.logoUrl && (
-                    <div className={`pb-2.5 flex ${receiptForm.logoAlignment === 'left' ? 'justify-start' : 'justify-center'}`}>
+                    <div
+                      style={{
+                        position: 'relative',
+                        top: `${-(receiptForm.logoOffsetYPx ?? 0)}px`,
+                        paddingBottom: '8px',
+                      }}
+                      className={`flex transition-transform duration-150 ${receiptForm.logoAlignment === 'left' ? 'justify-start' : 'justify-center'}`}
+                    >
                       <img
                         src={receiptForm.logoUrl}
                         alt="Logo"
                         style={{ width: `${receiptForm.logoWidthPx}px` }}
-                        className="object-contain max-h-24"
+                        className="object-contain max-h-48 h-auto"
                       />
                     </div>
                   )}
@@ -1223,10 +1700,12 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                       receiptForm.headerAlignment === 'left' ? 'text-left' : 'text-center'
                     }`}
                   >
-                    <h2 className="font-black text-base tracking-wider text-zinc-950">
-                      {receiptForm.businessName.toUpperCase()}
-                    </h2>
-                    {receiptForm.tagline && (
+                    {receiptForm.businessName && receiptForm.businessName.trim() !== '' && (
+                      <h2 className={`tracking-wider text-zinc-950 ${getHeading1Class()}`}>
+                        {receiptForm.businessName.toUpperCase()}
+                      </h2>
+                    )}
+                    {receiptForm.tagline && receiptForm.tagline.trim() !== '' && (
                       <p className="text-[10px] text-zinc-600 uppercase font-semibold mt-0.5">{receiptForm.tagline}</p>
                     )}
                     {receiptForm.address && (
@@ -1241,7 +1720,7 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                   <div className={`py-2.5 ${getReceiptDivider()} text-[11px] space-y-0.5`}>
                     <div className="flex justify-between items-center">
                       {receiptForm.showOrderNumber && (
-                        <span className="font-black text-zinc-950">
+                        <span className={`text-zinc-950 ${getHeading2Class()}`}>
                           {receiptForm.orderNumberPrefix} {sampleOrder.orderNumber.replace('#', '')}
                         </span>
                       )}
@@ -1255,7 +1734,7 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                     {receiptForm.showTableNumber && sampleOrder.tableNumber && (
                       <div className="flex justify-between text-zinc-700">
                         <span>Table Number:</span>
-                        <span className="font-black">Table {sampleOrder.tableNumber}</span>
+                        <span className={`text-zinc-950 ${getHeading3Class()}`}>Table {sampleOrder.tableNumber}</span>
                       </div>
                     )}
 
@@ -1269,18 +1748,18 @@ export const AdminReceiptDesignerPage: React.FC = () => {
 
                   {/* 4. Purchased Line Items */}
                   <div className={`py-2.5 ${getReceiptDivider()} space-y-2 text-xs`}>
-                    <div className="flex justify-between font-black text-[10px] text-zinc-500 uppercase tracking-wider pb-1 border-b border-zinc-200">
+                    <div className={`flex justify-between uppercase tracking-wider pb-1 border-b border-zinc-200 text-zinc-500 ${getHeading2Class()}`}>
                       <span>ITEM</span>
                       <span>TOTAL (Rs)</span>
                     </div>
 
                     {sampleOrder.items.map((item, idx) => (
                       <div key={idx} className="space-y-0.5">
-                        <div className="flex justify-between items-start gap-2 font-bold text-zinc-950">
+                        <div className={`flex justify-between items-start gap-2 text-zinc-950 ${getHeading3Class()}`}>
                           <span className="flex-1">
                             {item.quantity}x {item.name}
                           </span>
-                          <span className="tabular-nums whitespace-nowrap text-right shrink-0">
+                          <span className={`tabular-nums whitespace-nowrap text-right shrink-0 ${receiptForm.bodyBold ? 'font-bold' : 'font-semibold'}`}>
                             {(item.itemTotalCents / 100).toLocaleString('en-US', {
                               minimumFractionDigits: 2,
                               maximumFractionDigits: 2,
@@ -1392,14 +1871,14 @@ export const AdminReceiptDesignerPage: React.FC = () => {
                     </div>
                   )}
 
-                  {/* 9. Built-in Permanent Developer Credit Imprint */}
-                  <div className="mt-3 pt-2.5 border-t border-dashed border-zinc-200 text-center select-text">
-                    <div className="text-[9px] font-sans tracking-wide text-zinc-400 uppercase">
-                      Developed by <span className="font-bold text-zinc-700 tracking-wider">OGO TECHNOLOGY</span>
+                  {/* Built-in Developer Credits on Bottom of Slip */}
+                  <div className="mt-3.5 pt-2.5 border-t border-dashed border-zinc-900 text-center select-text thermal-dev-footer">
+                    <div className="text-[11px] font-mono font-black text-black uppercase tracking-wider">
+                      DEVELOPED BY OGO TECHNOLOGY
                     </div>
-                    <div className="text-[8.5px] text-zinc-400 mt-0.5 tracking-tight font-mono flex items-center justify-center gap-1.5 opacity-85">
+                    <div className="text-[10px] font-mono font-bold text-black mt-0.5 tracking-tight flex items-center justify-center gap-1.5">
                       <span>www.ogotechnology.net</span>
-                      <span className="opacity-40">•</span>
+                      <span>•</span>
                       <span>+94 75 930 7059</span>
                     </div>
                   </div>
@@ -1411,6 +1890,7 @@ export const AdminReceiptDesignerPage: React.FC = () => {
               {/* =================================================================== */}
               {documentMode === 'kot' && (
                 <div
+                  id="printable-kot"
                   style={{
                     maxWidth: kotForm.paperWidthMm === 58 ? '270px' : '340px',
                   }}
@@ -1554,21 +2034,35 @@ export const AdminReceiptDesignerPage: React.FC = () => {
             <span>Test Print</span>
           </button>
 
-          {/* Save Template Button - Appears when there is ANY unsaved change */}
-          {hasUnsavedChanges && (
-            <>
-              <div className="h-5 w-px bg-white/15 shrink-0 animate-in fade-in" />
-              <button
-                type="button"
-                onClick={() => handleManualSave()}
-                className="px-4.5 sm:px-5 py-2 rounded-full bg-brand-teal hover:bg-brand-teal-dark text-white text-xs font-extrabold shadow-teal transition-all active:scale-95 cursor-pointer flex items-center gap-2 whitespace-nowrap shrink-0 animate-in fade-in zoom-in-95 ring-2 ring-brand-teal/40"
-                title="Save changes to template & broadcast via WebSocket"
-              >
-                <Save className="w-3.5 h-3.5 shrink-0" />
-                <span>Save {documentMode === 'receipt' ? 'Receipt' : 'KOT'}</span>
-              </button>
-            </>
-          )}
+          <div className="h-5 w-px bg-white/15 shrink-0" />
+
+          {/* Save Template Button - Prominently indicates dirty/saved state */}
+          <button
+            type="button"
+            disabled={isSaving || !hasUnsavedChanges}
+            onClick={() => handleManualSave()}
+            className={`px-4.5 sm:px-5 py-2 rounded-full text-xs font-black transition-all active:scale-95 flex items-center gap-2 whitespace-nowrap shrink-0 ${
+              hasUnsavedChanges
+                ? 'bg-brand-teal hover:bg-brand-teal-dark text-white shadow-teal cursor-pointer ring-2 ring-brand-teal/60 shadow-lg animate-pulse'
+                : 'bg-white/10 text-white/40 cursor-default'
+            } ${isSaving ? 'opacity-75 cursor-wait' : ''}`}
+            title={hasUnsavedChanges ? "Save changes to Supabase database & broadcast via WebSockets" : "All changes saved to database"}
+          >
+            {isSaving ? (
+              <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+            ) : hasUnsavedChanges ? (
+              <Save className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Check className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+            )}
+            <span>
+              {isSaving
+                ? 'Saving to Database...'
+                : hasUnsavedChanges
+                ? `Save ${documentMode === 'receipt' ? 'Receipt' : 'KOT'} ●`
+                : 'All Saved'}
+            </span>
+          </button>
         </div>
       </div>
     </div>

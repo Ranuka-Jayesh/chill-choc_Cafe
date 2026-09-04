@@ -350,13 +350,17 @@ export interface PurchaseItem {
 
 export type PurchasePaymentMethod = 'CASH' | 'CARD' | 'CHEQUE';
 export type PurchasePaymentStatus = 'PAID' | 'PARTIAL' | 'UNPAID';
+export type ChequeStatus = 'PENDING' | 'CLEARED' | 'CANCELLED';
 
 export interface PurchasePaymentSplit {
+  id?: string;
   method: PurchasePaymentMethod;
   amountCents: number;
   chequeNumber?: string;
   bankName?: string;
   chequeDate?: string; // Cheque end date / due date
+  chequeStatus?: ChequeStatus; // 'PENDING' until cleared by supplier, then 'CLEARED'
+  clearedAt?: string; // Timestamp when supplier cashed / marked paid
   notes?: string;
   timestamp?: string;
 }
@@ -491,7 +495,14 @@ export interface Customer {
   pointHistory?: CustomerPointHistory[];
 }
 
-export type AttendanceDayStatus = 'PRESENT' | 'OVERTIME' | 'ABSENT' | 'HOLIDAY' | 'LATE' | 'EARLY_LEAVE';
+export type AttendanceDayStatus =
+  | 'PRESENT'
+  | 'OVERTIME'
+  | 'ABSENT'
+  | 'HOLIDAY'
+  | 'LATE'
+  | 'EARLY_LEAVE'
+  | 'SCHEDULED';
 
 export interface EmployeeAttendanceDay {
   status: AttendanceDayStatus;
@@ -508,6 +519,32 @@ export interface EmployeeAttendanceDay {
   isEarlyLeave?: boolean;
   earlyMinutes?: number;
   notes?: string;
+}
+
+export interface AttendanceRecord {
+  id: string; // e.g. "att_${employeeId}_${date}"
+  employeeId: string;
+  employeeName?: string;
+  date: string; // "YYYY-MM-DD"
+  status: AttendanceDayStatus;
+  standardShiftHours?: number;
+  overtimeHours?: number;
+  checkInTime?: string;
+  checkOutTime?: string;
+  checkInSignature?: string; // Base64 signature data URL
+  checkOutSignature?: string; // Base64 signature data URL
+  workedHours?: number;
+  workedMinutes?: number;
+  overtimeMinutes?: number;
+  earlyLeaveHours?: number;
+  earlyLeaveMinutes?: number;
+  isLate?: boolean;
+  lateMinutes?: number;
+  isEarlyLeave?: boolean;
+  earlyMinutes?: number;
+  notes?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface EmployeeAttendanceDetailRow {
@@ -660,8 +697,11 @@ export interface ReceiptCustomizationSettings {
   // Logo & Branding
   showLogo: boolean;
   logoUrl?: string;
-  logoWidthPx: number; // 60 to 160
+  logoWidthPx: number; // 40 to 300
   logoAlignment: 'center' | 'left';
+  logoOffsetYPx?: number; // -50 to +50 (Center: 0, Right > 0: Move Up, Left < 0: Move Down)
+  logoMarginTopPx?: number;
+  logoMarginBottomPx?: number;
   businessName: string;
   tagline: string;
   address: string;
@@ -676,6 +716,15 @@ export interface ReceiptCustomizationSettings {
   paperWidthMm: 58 | 80;
   fontFamily: 'mono' | 'courier' | 'sans';
   fontSize: 'compact' | 'normal' | 'large';
+
+  // Typography Hierarchy & Weight Customizations
+  heading1Size?: 'small' | 'normal' | 'large' | 'xlarge';
+  heading1Bold?: boolean;
+  heading2Size?: 'small' | 'normal' | 'large';
+  heading2Bold?: boolean;
+  heading3Size?: 'small' | 'normal' | 'large';
+  heading3Bold?: boolean;
+  bodyBold?: boolean;
 
   // Metadata Toggles
   showOrderNumber: boolean;
@@ -786,6 +835,14 @@ export interface SystemSettings {
   allowCashierManualCashOut: boolean;
   openDrawerAfterCashSale: boolean;
   defaultTerminalId: string;
+  // Direct Thermal Printing (Windows Local Agent / XPrinter)
+  directPrintEnabled?: boolean;
+  directPrintAgentUrl?: string; // default "http://127.0.0.1:23456"
+  directPrintAuthToken?: string;
+  directPrintPrinterName?: string; // e.g. "XP-80C"
+  directPrintPaperWidthMm?: 58 | 80;
+  directPrintAutoCut?: boolean;
+  directPrintDrawerKick?: boolean;
   // Customer Loyalty & Rewards Program Settings
   loyaltyProgramEnabled: boolean;
   loyaltyProgramName: string; // e.g. 'Chill Club Rewards'

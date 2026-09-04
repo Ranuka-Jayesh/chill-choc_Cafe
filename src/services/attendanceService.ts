@@ -61,7 +61,26 @@ export const attendanceService = {
    */
   getEmployeeLiveState(employee: Employee, now: Date = new Date()): EmployeeLiveAttendanceState {
     const dateKey = this.getTodayDateKey();
-    const record = employee.attendanceRecords?.[dateKey] || null;
+    const allAtt = db.getSnapshot().attendance || [];
+    const dedicated = allAtt.find((a) => a.employeeId === employee.id && a.date === dateKey);
+    const record: EmployeeAttendanceDay | null = dedicated
+      ? {
+          status: dedicated.status,
+          standardShiftHours: dedicated.standardShiftHours,
+          overtimeHours: dedicated.overtimeHours,
+          checkInTime: dedicated.checkInTime,
+          checkOutTime: dedicated.checkOutTime,
+          checkInSignature: dedicated.checkInSignature,
+          checkOutSignature: dedicated.checkOutSignature,
+          workedHours: dedicated.workedHours,
+          earlyLeaveHours: dedicated.earlyLeaveHours,
+          isLate: dedicated.isLate,
+          lateMinutes: dedicated.lateMinutes,
+          isEarlyLeave: dedicated.isEarlyLeave,
+          earlyMinutes: dedicated.earlyMinutes,
+          notes: dedicated.notes,
+        }
+      : employee.attendanceRecords?.[dateKey] || null;
     const shiftTiming = this.getShiftTiming(employee);
 
     // Parse shift start time into Date object for today
@@ -293,7 +312,26 @@ export const attendanceService = {
 
     const now = new Date();
     const dateKey = this.getTodayDateKey();
-    const existingRecord = employee.attendanceRecords?.[dateKey];
+    const allAtt = db.getSnapshot().attendance || [];
+    const dedicated = allAtt.find((a) => a.employeeId === employeeId && a.date === dateKey);
+    const existingRecord: EmployeeAttendanceDay | undefined = dedicated
+      ? {
+          status: dedicated.status,
+          standardShiftHours: dedicated.standardShiftHours,
+          overtimeHours: dedicated.overtimeHours,
+          checkInTime: dedicated.checkInTime,
+          checkOutTime: dedicated.checkOutTime,
+          checkInSignature: dedicated.checkInSignature,
+          checkOutSignature: dedicated.checkOutSignature,
+          workedHours: dedicated.workedHours,
+          earlyLeaveHours: dedicated.earlyLeaveHours,
+          isLate: dedicated.isLate,
+          lateMinutes: dedicated.lateMinutes,
+          isEarlyLeave: dedicated.isEarlyLeave,
+          earlyMinutes: dedicated.earlyMinutes,
+          notes: dedicated.notes,
+        }
+      : employee.attendanceRecords?.[dateKey];
     const shiftTiming = this.getShiftTiming(employee);
 
     if (!existingRecord || !existingRecord.checkInTime) {

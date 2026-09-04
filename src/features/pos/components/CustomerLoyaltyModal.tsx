@@ -194,14 +194,14 @@ export const CustomerLoyaltyModal: React.FC<CustomerLoyaltyModalProps> = ({
     const redeemPts = maxRedeemablePoints;
     const discCents = redeemPts * pointValueCents;
     onSelectCustomer(cust, redeemPts, discCents);
-    toast.success(`🎉 Redeemed ${redeemPts} points (-Rs. ${(discCents / 100).toFixed(2)}) for ${cust.name}!`);
+    toast.success(`Redeemed ${redeemPts} points (-Rs. ${(discCents / 100).toFixed(2)}) for ${cust.name}!`);
     onClose();
   };
 
   // Direct 1-Click: Continue Without Redeeming & Link
   const handleDirectContinue = (cust: Customer) => {
     onSelectCustomer(cust, 0, 0);
-    toast.success(`✅ Linked ${cust.name} to earn +${estimatedEarnedPoints} points!`);
+    toast.success(`Linked ${cust.name} to earn +${estimatedEarnedPoints} points!`);
     onClose();
   };
 
@@ -228,7 +228,7 @@ export const CustomerLoyaltyModal: React.FC<CustomerLoyaltyModalProps> = ({
       notes: 'Registered at POS Counter during checkout',
     });
 
-    toast.success(`🎉 Profile created! +${welcomeBonus} Welcome Points credited to ${newCust.name}!`);
+    toast.success(`Profile created! +${welcomeBonus} Welcome Points credited to ${newCust.name}!`);
     setSelectedCustomer(newCust);
     setIsRegistering(false);
     onSelectCustomer(newCust, 0, 0);
@@ -525,7 +525,7 @@ export const CustomerLoyaltyModal: React.FC<CustomerLoyaltyModalProps> = ({
                       <div className="p-3 rounded-2xl bg-[#FAF7F2] border border-[#EAE3DA] text-xs text-amber-900 font-medium flex items-center gap-2">
                         <Gift className="w-4 h-4 text-amber-600 shrink-0" />
                         <span>
-                          🎁 +{settings.loyaltySignupBonusPoints || 25} Welcome Bonus Points credited!
+                          +{settings.loyaltySignupBonusPoints || 25} Welcome Bonus Points credited!
                         </span>
                       </div>
                     </div>

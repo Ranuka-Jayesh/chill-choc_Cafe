@@ -284,9 +284,9 @@ export const printerService = {
 
     lines.push('--------------------------------');
     lines.push(settings.receiptFooter || 'Thank you for your visit!');
-    lines.push('--------------------------------');
-    lines.push('  Developed by OGO TECHNOLOGY   ');
-    lines.push('www.ogotechnology.net • +94 75 930 7059');
+    lines.push('  DEVELOPED BY OGO TECHNOLOGY   ');
+    lines.push('     www.ogotechnology.net      ');
+    lines.push('        +94 75 930 7059         ');
     lines.push('================================');
 
     const payloadText = lines.join('\n');

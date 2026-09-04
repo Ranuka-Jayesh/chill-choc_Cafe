@@ -309,8 +309,36 @@ export const AdminAccountingPage: React.FC = () => {
           )
           .map((s) => s.businessDate || s.openedAt?.split('T')[0])
       );
-      const shiftDaysCount = shiftAttendedDates.size;
-      const attendedDays = shiftDaysCount > 0 ? shiftDaysCount : (emp.attendedDays ?? 26);
+
+      // Count actual attended days from dedicated attendance table and legacy records
+      const allAtt = db.getSnapshot().attendance || [];
+      const attendanceDates = new Set<string>();
+
+      allAtt
+        .filter(
+          (a) =>
+            a.employeeId === emp.id &&
+            (a.status === 'PRESENT' || a.status === 'LATE' || a.status === 'EARLY_LEAVE' || a.status === 'OVERTIME') &&
+            isMatchingPeriod(a.date)
+        )
+        .forEach((a) => attendanceDates.add(a.date));
+
+      if (emp.attendanceRecords) {
+        Object.entries(emp.attendanceRecords).forEach(([d, r]: [string, any]) => {
+          if (
+            (r.status === 'PRESENT' || r.status === 'LATE' || r.status === 'EARLY_LEAVE' || r.status === 'OVERTIME') &&
+            isMatchingPeriod(d)
+          ) {
+            attendanceDates.add(d);
+          }
+        });
+      }
+
+      shiftAttendedDates.forEach((d) => {
+        if (d) attendanceDates.add(d);
+      });
+
+      const attendedDays = attendanceDates.size;
 
       return {
         ...emp,
@@ -471,18 +499,52 @@ export const AdminAccountingPage: React.FC = () => {
     if (!supData) return null;
     const q = search.toLowerCase().trim();
 
+    // Roll forward unpaid POs into next months until fully paid
+    const periodPOs = supData.purchases.filter((po) => {
+      if (dateRange.year !== 'ALL') {
+        const pDate = new Date(po.purchaseDate);
+        const pYear = pDate.getFullYear();
+        const pMonth = pDate.getMonth() + 1;
+        const targetYear = parseInt(dateRange.year, 10);
+        const targetMonth = dateRange.month !== 'ALL' ? parseInt(dateRange.month, 10) : null;
+
+        if (targetMonth === null) {
+          const isSameYear = pYear === targetYear;
+          const isPriorYearUnpaid = pYear < targetYear && ((po.dueCents ?? 0) > 0 || po.paymentStatus !== 'PAID');
+          if (!isSameYear && !isPriorYearUnpaid) return false;
+        } else {
+          const isCreatedInSelectedMonth = pYear === targetYear && pMonth === targetMonth;
+          const isPriorMonth = pYear < targetYear || (pYear === targetYear && pMonth < targetMonth);
+          const hasOutstandingDue = (po.dueCents ?? 0) > 0 || po.paymentStatus !== 'PAID';
+          const wasPaidInSelectedMonth = (po.payments || []).some((pm) => {
+            if (!pm.timestamp) return false;
+            const pmDate = new Date(pm.timestamp);
+            return pmDate.getFullYear() === targetYear && pmDate.getMonth() + 1 === targetMonth;
+          });
+
+          if (!isCreatedInSelectedMonth && !(isPriorMonth && (hasOutstandingDue || wasPaidInSelectedMonth))) {
+            return false;
+          }
+        }
+      }
+      return true;
+    });
+
     const filteredPOs = !q
-      ? supData.purchases
-      : supData.purchases.filter(
+      ? periodPOs
+      : periodPOs.filter(
           (po) =>
             po.purchaseNumber.toLowerCase().includes(q) ||
             po.invoiceNumber.toLowerCase().includes(q) ||
             po.items.some((it) => it.ingredientName.toLowerCase().includes(q))
         );
 
+    // Payments strictly attributed to the month the payment was actually made
+    const periodPayments = supData.paymentsHistory.filter((pm) => isMatchingPeriod(pm.timestamp));
+
     const filteredPayments = !q
-      ? supData.paymentsHistory
-      : supData.paymentsHistory.filter(
+      ? periodPayments
+      : periodPayments.filter(
           (pm) =>
             pm.poNumber.toLowerCase().includes(q) ||
             pm.method.toLowerCase().includes(q) ||
@@ -496,7 +558,7 @@ export const AdminAccountingPage: React.FC = () => {
       filteredPurchases: filteredPOs,
       filteredPayments,
     };
-  }, [selectedSupplierId, supplierLedgers, search]);
+  }, [selectedSupplierId, supplierLedgers, dateRange, search]);
 
   // ---------------------------------------------------------------------------
   // Operating Expenses
@@ -785,13 +847,12 @@ export const AdminAccountingPage: React.FC = () => {
   };
 
   const handleAddSupplierItem = () => {
-    const defaultIng = ingredients[0];
     const newItem: SupplierProvidedItem = {
       id: `item_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      ingredientId: defaultIng?.id || '',
+      ingredientId: '',
       name: '',
-      unit: defaultIng?.unit || 'kg',
-      sku: defaultIng?.sku || '',
+      unit: 'kg',
+      sku: '',
     };
     setEditingSupplier((prev) => ({
       ...prev!,
@@ -1513,9 +1574,13 @@ export const AdminAccountingPage: React.FC = () => {
                               <span className="px-2 py-0.5 rounded-md font-extrabold text-[10px] uppercase bg-rose-50 text-rose-800 border border-rose-300 inline-block">
                                 Absent
                               </span>
-                            ) : (
+                            ) : row.status === 'HOLIDAY' ? (
                               <span className="px-2 py-0.5 rounded-md font-semibold text-[10px] uppercase bg-neutral-100 text-text-muted inline-block">
                                 Holiday
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-md font-semibold text-[10px] uppercase bg-stone-100 text-text-muted border border-stone-200 inline-block">
+                                Scheduled
                               </span>
                             )}
                           </td>
@@ -1526,7 +1591,7 @@ export const AdminAccountingPage: React.FC = () => {
                             <span>{row.checkOutTime}</span>
                           </td>
                           <td className="py-2 px-3 text-center">
-                            {row.status === 'HOLIDAY' || row.status === 'ABSENT' ? (
+                            {row.status === 'HOLIDAY' || row.status === 'ABSENT' || row.status === 'SCHEDULED' || (!row.checkInSignature && !row.checkOutSignature) ? (
                               <span className="text-text-muted text-[11px] font-mono">-</span>
                             ) : (
                               <div className="flex items-center justify-center gap-2.5">
@@ -1541,9 +1606,11 @@ export const AdminAccountingPage: React.FC = () => {
                                   ) : (
                                     <span className="text-[10px] font-bold text-text-muted">-</span>
                                   )}
-                                  <span className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-0.5 rounded bg-brand-brown-deep text-white text-[9px] font-bold whitespace-nowrap z-20 shadow-md">
-                                    Check-In Signature ({row.checkInTime})
-                                  </span>
+                                  {row.checkInSignature && (
+                                    <span className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-0.5 rounded bg-brand-brown-deep text-white text-[9px] font-bold whitespace-nowrap z-20 shadow-md">
+                                      Check-In Signature ({row.checkInTime})
+                                    </span>
+                                  )}
                                 </div>
 
                                 {/* Separator */}
@@ -1560,9 +1627,11 @@ export const AdminAccountingPage: React.FC = () => {
                                   ) : (
                                     <span className="text-[10px] font-bold text-text-muted">-</span>
                                   )}
-                                  <span className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-0.5 rounded bg-brand-brown-deep text-white text-[9px] font-bold whitespace-nowrap z-20 shadow-md">
-                                    Check-Out Signature ({row.checkOutTime})
-                                  </span>
+                                  {row.checkOutSignature && (
+                                    <span className="hidden group-hover:block absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-0.5 rounded bg-brand-brown-deep text-white text-[9px] font-bold whitespace-nowrap z-20 shadow-md">
+                                      Check-Out Signature ({row.checkOutTime})
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -1587,6 +1656,8 @@ export const AdminAccountingPage: React.FC = () => {
                               <span className="text-text-muted text-[11px]">
                                 Off / Holiday
                               </span>
+                            ) : row.status === 'SCHEDULED' ? (
+                              <span className="text-text-muted text-[11px]">-</span>
                             ) : (
                               <span className="text-text-muted text-[11px]">
                                 0.0 hrs (On Track)
@@ -2827,7 +2898,7 @@ export const AdminAccountingPage: React.FC = () => {
                             Attended Days
                           </span>
                           <strong className="text-xs sm:text-sm text-brand-teal font-mono font-black">
-                            {isPayingEmployee.attendedDays ?? 26} Days
+                            {isPayingEmployee.attendedDays ?? 0} Days
                           </strong>
                         </div>
                         <div>
@@ -3993,7 +4064,7 @@ export const AdminAccountingPage: React.FC = () => {
                                           sku: matchedIng.sku || item.sku,
                                         });
                                       } else {
-                                        handleUpdateSupplierItem(idx, { name: val });
+                                        handleUpdateSupplierItem(idx, { name: val, ingredientId: '' });
                                       }
                                     }}
                                     placeholder="e.g. Fresh Cow Milk"

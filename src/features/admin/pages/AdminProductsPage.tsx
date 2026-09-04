@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { catalogService } from '@/services/catalogService';
 import { inventoryService } from '@/services/inventoryService';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
+import { supabaseStorageService } from '@/services/supabaseStorageService';
 import { Product, Category, ModifierGroup, ModifierOption, Ingredient, RecipeItem } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatLKR, rupeesToCents, centsToRupees } from '@/utils/format';
@@ -13,6 +14,7 @@ import {
   Plus,
   Search,
   Edit2,
+  Loader2,
   Trash2,
   Check,
   X,
@@ -201,6 +203,7 @@ export const AdminProductsPage: React.FC = () => {
   const [productRecipeItems, setProductRecipeItems] = useState<RecipeItem[]>([]);
   const imageInputRef = React.useRef<HTMLInputElement>(null);
   const categoryIconInputRef = React.useRef<HTMLInputElement>(null);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
 
   // Live Recipe Calculations for Product Studio
   const calculatedPortionCostCents = useMemo(() => {
@@ -437,7 +440,7 @@ export const AdminProductsPage: React.FC = () => {
     }
   };
 
-  const handleImageUpload = (file: File) => {
+  const handleImageUpload = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       toast.error('Please upload a valid image file (PNG, JPG, WebP).');
       return;
@@ -448,18 +451,38 @@ export const AdminProductsPage: React.FC = () => {
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const dataUrl = e.target?.result as string;
-      if (dataUrl && editingProduct) {
+    setIsUploadingImage(true);
+    const toastId = toast.loading('Uploading product image to Supabase Storage...');
+
+    try {
+      const oldImg = editingProduct?.image;
+      const result = await supabaseStorageService.uploadProductImage(file);
+      if (editingProduct) {
         setEditingProduct({
           ...editingProduct,
-          image: dataUrl,
+          image: result.url,
         });
-        toast.success('Product image uploaded successfully.');
       }
-    };
-    reader.readAsDataURL(file);
+
+      if (oldImg && oldImg !== result.url) {
+        supabaseStorageService.deleteProductImage(oldImg).catch((err) => {
+          console.warn('Error deleting previous product image:', err);
+        });
+      }
+
+      if (result.isSupabaseStorage) {
+        toast.success('Image saved to Supabase Storage!', { id: toastId });
+      } else {
+        toast.warning(
+          `Stored image locally (${result.error || 'Bucket "products" not configured in Supabase'}).`,
+          { id: toastId, duration: 5000 }
+        );
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to upload image.', { id: toastId });
+    } finally {
+      setIsUploadingImage(false);
+    }
   };
 
   const handleCategoryIconUpload = (file: File) => {
@@ -613,6 +636,11 @@ export const AdminProductsPage: React.FC = () => {
       variant: 'danger',
     });
     if (confirmed) {
+      if (p.image) {
+        supabaseStorageService.deleteProductImage(p.image).catch((err) => {
+          console.warn('Error deleting product image from storage:', err);
+        });
+      }
       catalogService.deleteProduct(productId);
       const existingRecipe = inventoryService.getRecipes().find((r) => r.productId === productId);
       if (existingRecipe) {
@@ -2253,7 +2281,14 @@ export const AdminProductsPage: React.FC = () => {
                       }}
                     />
 
-                    {editingProduct.image ? (
+                    {isUploadingImage ? (
+                      /* Uploading State */
+                      <div className="relative flex-1 w-full h-full min-h-[130px] rounded-2xl border border-brand-teal/40 bg-teal-50/50 flex flex-col items-center justify-center p-4 text-center shadow-xs">
+                        <Loader2 className="w-8 h-8 text-brand-teal animate-spin mb-2" />
+                        <span className="text-xs font-black text-brand-teal">Uploading to Supabase Storage...</span>
+                        <span className="text-[10px] text-text-muted mt-0.5">Generating permanent cloud image URL</span>
+                      </div>
+                    ) : editingProduct.image ? (
                       /* When Image Is Attached: Rich Preview Box with Overlay Actions */
                       <div className="relative group flex-1 w-full h-full min-h-[130px] rounded-2xl overflow-hidden border border-[#E2D8CC] bg-cream-100 flex items-center justify-center shadow-xs">
                         <img
@@ -2264,6 +2299,14 @@ export const AdminProductsPage: React.FC = () => {
                             setEditingProduct({ ...editingProduct, image: '' });
                           }}
                         />
+                        {/* Storage Indicator Badge */}
+                        {editingProduct.image.includes('supabase.co/storage') && (
+                          <div className="absolute top-2 right-2 px-2 py-0.5 rounded-full bg-emerald-600/90 backdrop-blur-xs text-white text-[9px] font-black shadow-xs flex items-center gap-1 z-10">
+                            <Check className="w-2.5 h-2.5 stroke-[3]" />
+                            <span>Supabase Storage</span>
+                          </div>
+                        )}
+
                         {/* Overlay Actions on Hover / Touch */}
                         <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 backdrop-blur-2xs transition-all duration-200 flex items-center justify-center gap-2 p-2">
                           <button
@@ -2276,7 +2319,15 @@ export const AdminProductsPage: React.FC = () => {
                           </button>
                           <button
                             type="button"
-                            onClick={() => setEditingProduct({ ...editingProduct, image: '' })}
+                            onClick={() => {
+                              const oldImg = editingProduct.image;
+                              if (oldImg) {
+                                supabaseStorageService.deleteProductImage(oldImg).catch((err) => {
+                                  console.warn('Error deleting image from storage:', err);
+                                });
+                              }
+                              setEditingProduct({ ...editingProduct, image: '' });
+                            }}
                             className="px-3 py-1.5 bg-status-danger hover:bg-red-700 text-white rounded-xl text-[11px] font-extrabold shadow-md flex items-center gap-1.5 transition-transform active:scale-95 cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -2292,12 +2343,12 @@ export const AdminProductsPage: React.FC = () => {
                     ) : (
                       /* When No Image: Spacious Responsive Dropzone with Faded Watermark Logo Filling Card */
                       <div
-                        onClick={() => imageInputRef.current?.click()}
+                        onClick={() => !isUploadingImage && imageInputRef.current?.click()}
                         onDragOver={(e) => e.preventDefault()}
                         onDrop={(e) => {
                           e.preventDefault();
                           const file = e.dataTransfer.files?.[0];
-                          if (file) handleImageUpload(file);
+                          if (file && !isUploadingImage) handleImageUpload(file);
                         }}
                         className="relative flex-1 w-full h-full min-h-[130px] p-4 rounded-2xl border-2 border-dashed border-[#D6C7B7] hover:border-brand-teal bg-[#FAF7F2] hover:bg-cream-50 transition-all duration-200 flex flex-col items-center justify-center text-center group cursor-pointer overflow-hidden shadow-2xs"
                       >
@@ -2320,7 +2371,7 @@ export const AdminProductsPage: React.FC = () => {
                           </div>
                           <div>
                             <span className="text-xs font-extrabold text-brand-brown-dark group-hover:text-brand-teal transition-colors block leading-tight">
-                              Upload Product Image
+                              Upload to Supabase Storage
                             </span>
                             <span className="text-[10px] text-text-muted block mt-1">
                               Click or drag & drop (PNG, JPG, WEBP)

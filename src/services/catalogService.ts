@@ -1,94 +1,7 @@
 import { db } from './storage/db';
-import { Product, Category, ModifierGroup, Supplier, Expense, Purchase } from '@/types';
+import { Product, Category, ModifierGroup, Supplier, SupplierProvidedItem, Ingredient, Expense, Purchase } from '@/types';
 import { realtimeSocketService } from './realtimeSocketService';
-
-const SEED_PURCHASES: Purchase[] = [
-  {
-    id: 'po_001',
-    purchaseNumber: 'PO-8801',
-    supplierId: 'sup_ceylon_coffee',
-    supplierName: 'Ceylon Coffee Roasters Ltd',
-    invoiceNumber: 'CCR-INV-9921',
-    purchaseDate: '2026-08-25T09:30:00.000Z',
-    status: 'RECEIVED',
-    paymentStatus: 'PAID',
-    subtotalCents: 4500000,
-    discountCents: 0,
-    totalCents: 4500000,
-    paidCents: 4500000,
-    dueCents: 0,
-    payments: [{ method: 'CARD', amountCents: 4500000, timestamp: '2026-08-25T09:30:00.000Z' }],
-    items: [
-      {
-        ingredientId: 'ing_beans',
-        ingredientName: 'Specialty Espresso Beans',
-        quantity: 10,
-        unit: 'kg',
-        unitPriceCents: 450000,
-        totalCents: 4500000,
-      },
-    ],
-    receivedAt: '2026-08-25T09:30:00.000Z',
-    notes: 'Premium dark roast blend delivery',
-  },
-  {
-    id: 'po_002',
-    purchaseNumber: 'PO-8802',
-    supplierId: 'sup_highland_dairy',
-    supplierName: 'Highland Pure Dairy LK',
-    invoiceNumber: 'HPD-7721',
-    purchaseDate: '2026-08-26T07:15:00.000Z',
-    status: 'RECEIVED',
-    paymentStatus: 'PAID',
-    subtotalCents: 2750000,
-    discountCents: 0,
-    totalCents: 2750000,
-    paidCents: 2750000,
-    dueCents: 0,
-    payments: [{ method: 'CASH', amountCents: 2750000, timestamp: '2026-08-26T07:15:00.000Z' }],
-    items: [
-      {
-        ingredientId: 'ing_milk',
-        ingredientName: 'Fresh Whole Barista Milk',
-        quantity: 50,
-        unit: 'L',
-        unitPriceCents: 55000,
-        totalCents: 2750000,
-      },
-    ],
-    receivedAt: '2026-08-26T07:15:00.000Z',
-    notes: 'Daily dairy restock',
-  },
-  {
-    id: 'po_003',
-    purchaseNumber: 'PO-8803',
-    supplierId: 'sup_choc_lanka',
-    supplierName: 'Choc & Bakers Supplies Lanka',
-    invoiceNumber: 'CBS-4412',
-    purchaseDate: '2026-08-27T11:00:00.000Z',
-    status: 'RECEIVED',
-    paymentStatus: 'PARTIAL',
-    subtotalCents: 5250000,
-    discountCents: 0,
-    totalCents: 5250000,
-    paidCents: 3000000,
-    dueCents: 2250000,
-    dueDate: '2026-09-05T00:00:00.000Z',
-    payments: [{ method: 'CHEQUE', amountCents: 3000000, chequeNumber: 'CHQ-9901', bankName: 'Commercial Bank' }],
-    items: [
-      {
-        ingredientId: 'ing_choc_chips',
-        ingredientName: 'Belgian Dark Choc Ganache',
-        quantity: 15,
-        unit: 'kg',
-        unitPriceCents: 350000,
-        totalCents: 5250000,
-      },
-    ],
-    receivedAt: '2026-08-27T11:00:00.000Z',
-    notes: 'Special waffle toppings batch',
-  },
-];
+import { supabaseStorageService } from './supabaseStorageService';
 
 export const catalogService = {
   getCategories: (): Category[] => {
@@ -143,6 +56,12 @@ export const catalogService = {
     let saved: Product;
 
     if (existing) {
+      // If product image was replaced or removed, delete former image from Supabase storage
+      if (existing.image && product.image !== undefined && existing.image !== product.image) {
+        supabaseStorageService.deleteProductImage(existing.image).catch((err) => {
+          console.warn('Error deleting old product image from storage:', err);
+        });
+      }
       saved = { ...existing, ...product };
       db.update('products', (prods) => prods.map((p) => (p.id === existing.id ? saved : p)));
       realtimeSocketService.emitCatalogChanged('UPDATE', 'product', saved);
@@ -168,6 +87,12 @@ export const catalogService = {
   },
 
   deleteProduct: (id: string): void => {
+    const product = db.getSnapshot().products.find((p) => p.id === id);
+    if (product?.image) {
+      supabaseStorageService.deleteProductImage(product.image).catch((err) => {
+        console.warn('Error deleting product image from storage:', err);
+      });
+    }
     db.update('products', (prods) => prods.filter((p) => p.id !== id));
     realtimeSocketService.emitCatalogChanged('DELETE', 'product', { id });
   },
@@ -218,15 +143,76 @@ export const catalogService = {
   },
 
   saveSupplier: (supplier: Partial<Supplier> & { name: string }): Supplier => {
-    const list = db.getSnapshot().suppliers;
-    const existing = supplier.id ? list.find((s) => s.id === supplier.id) : null;
+    const existing = supplier.id ? catalogService.getSuppliers().find((s) => s.id === supplier.id) : undefined;
+    const targetId = supplier.id || existing?.id || `sup_${Date.now()}`;
+
+    // Normalize and register any providedItems into database ingredients
+    const currentIngs = db.getSnapshot().ingredients || [];
+    const normalizedProvidedItems: SupplierProvidedItem[] = [];
+
+    (supplier.providedItems || []).forEach((pItem, idx) => {
+      const cleanName = pItem.name?.trim();
+      if (!cleanName) return;
+
+      const matchedIng = currentIngs.find(
+        (i) =>
+          (pItem.ingredientId && i.id === pItem.ingredientId) ||
+          i.name.toLowerCase() === cleanName.toLowerCase()
+      );
+
+      if (matchedIng) {
+        // Link existing ingredient to this supplier if not already linked
+        if (matchedIng.supplierId !== targetId) {
+          db.update('ingredients', (ings) =>
+            ings.map((i) => (i.id === matchedIng.id ? { ...i, supplierId: targetId } : i))
+          );
+        }
+        normalizedProvidedItems.push({
+          ...pItem,
+          id: pItem.id || `item_${Date.now()}_${idx}`,
+          name: cleanName,
+          ingredientId: matchedIng.id,
+          unit: matchedIng.unit || pItem.unit || 'kg',
+          sku: matchedIng.sku || pItem.sku || `SKU-${idx + 1}`,
+        });
+      } else {
+        // Create new real ingredient in database for this supplier
+        const newIngId = pItem.ingredientId || `ing_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+        const newIng: Ingredient = {
+          id: newIngId,
+          name: cleanName,
+          sku: pItem.sku?.trim() || `SKU-${Date.now().toString().slice(-4)}`,
+          unit: (pItem.unit as any) || 'kg',
+          currentStock: 0,
+          reorderLevel: 5,
+          averageCostCents: pItem.unitPriceCents || 50000,
+          supplierId: targetId,
+          active: true,
+        };
+        db.update('ingredients', (ings) => [...ings, newIng]);
+        normalizedProvidedItems.push({
+          ...pItem,
+          id: pItem.id || `item_${Date.now()}_${idx}`,
+          name: cleanName,
+          ingredientId: newIngId,
+          unit: newIng.unit,
+          sku: newIng.sku,
+        });
+      }
+    });
+
     let saved: Supplier;
     if (existing) {
-      saved = { ...existing, ...supplier };
+      saved = {
+        ...existing,
+        ...supplier,
+        id: targetId,
+        providedItems: normalizedProvidedItems,
+      };
       db.update('suppliers', (sups) => sups.map((s) => (s.id === existing.id ? saved : s)));
     } else {
       saved = {
-        id: `sup_${Date.now()}`,
+        id: targetId,
         name: supplier.name,
         contactPerson: supplier.contactPerson || '',
         phone: supplier.phone || '',
@@ -234,24 +220,22 @@ export const catalogService = {
         address: supplier.address || '',
         active: supplier.active ?? true,
         notes: supplier.notes || '',
-        providedItems: supplier.providedItems || [],
+        providedItems: normalizedProvidedItems,
       };
       db.update('suppliers', (sups) => [...sups, saved]);
     }
+
+    realtimeSocketService.emitStockChanged(undefined, { action: 'SUPPLIER_SAVED', supplier: saved });
     return saved;
   },
 
   deleteSupplier: (id: string): void => {
     db.update('suppliers', (sups) => sups.filter((s) => s.id !== id));
+    realtimeSocketService.emitStockChanged(undefined, { action: 'SUPPLIER_DELETED', supplierId: id });
   },
 
   getPurchases: (): Purchase[] => {
-    const list = db.getSnapshot().purchases;
-    if (!list || list.length === 0) {
-      db.update('purchases', () => SEED_PURCHASES);
-      return SEED_PURCHASES;
-    }
-    return list;
+    return db.getSnapshot().purchases || [];
   },
 
   getExpenses: (): Expense[] => {
