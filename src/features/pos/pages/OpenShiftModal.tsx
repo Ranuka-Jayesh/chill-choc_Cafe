@@ -8,6 +8,9 @@ import { format } from 'date-fns';
 import { Coins, Sparkles, ShieldCheck, ArrowRight, LogOut } from 'lucide-react';
 import { toast } from 'sonner';
 
+import { useAuthStore } from '@/store/useAuthStore';
+import { db } from '@/services/storage/db';
+
 interface OpenShiftModalProps {
   user: User;
   onShiftOpened: (shift: CashierShift) => void;
@@ -22,14 +25,22 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
   const [openingRupees, setOpeningRupees] = useState<string>('10000');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const session = useAuthStore.getState().session;
+  const terminalId = session?.terminalId || 'term_01';
+  const allTerminals = db.getSnapshot().terminals || [];
+  const currentTerminal = allTerminals.find((t) => t.id === terminalId);
+  const terminalName = currentTerminal
+    ? `${currentTerminal.name} (${currentTerminal.code})`
+    : 'Main Counter POS-01';
+
   const presets = [5000, 10000, 15000, 20000, 25000];
 
   const handleStartShift = async (e: React.FormEvent) => {
     e.preventDefault();
     const openingCashCents = rupeesToCents(openingRupees);
 
-    if (openingCashCents < 0) {
-      toast.error('Opening cash cannot be negative.');
+    if (openingCashCents <= 0) {
+      toast.error('Please enter a valid starting cash float (greater than Rs. 0).');
       return;
     }
 
@@ -38,8 +49,8 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
       const newShift = await shiftService.openShift({
         cashierId: user.id,
         cashierName: user.name,
-        terminalId: 'term_01',
-        terminalName: 'Main Counter POS-01',
+        terminalId,
+        terminalName,
         openingCashCents,
       });
 
@@ -50,26 +61,6 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
       onShiftOpened(newShift);
     } catch (err: any) {
       toast.error(err.message || 'Failed to open shift');
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleQuickStartZeroFloat = async () => {
-    setIsSubmitting(true);
-    try {
-      const newShift = await shiftService.openShift({
-        cashierId: user.id,
-        cashierName: user.name,
-        terminalId: 'term_01',
-        terminalName: 'Main Counter POS-01',
-        openingCashCents: 0,
-      });
-      soundService.playWelcome();
-      toast.success('POS ready! Shift started with Rs. 0 float.');
-      onShiftOpened(newShift);
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to start shift');
     } finally {
       setIsSubmitting(false);
     }
@@ -89,7 +80,7 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
             Good Day, {user.name}
           </h2>
           <p className="text-xs text-text-secondary mt-0.5">
-            Count drawer starting cash, or skip to start taking orders immediately.
+            Count and declare the physical starting cash in your register drawer.
           </p>
         </div>
 
@@ -97,7 +88,7 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
         <div className="grid grid-cols-2 gap-3 p-3.5 bg-cream-50 rounded-2xl border border-border text-xs">
           <div>
             <span className="text-text-secondary uppercase font-bold text-[10px]">POS Terminal</span>
-            <div className="font-extrabold text-brand-brown-dark text-xs sm:text-sm mt-0.5">POS-01 (Ground Floor)</div>
+            <div className="font-extrabold text-brand-brown-dark text-xs sm:text-sm mt-0.5">{terminalName}</div>
           </div>
           <div className="text-right">
             <span className="text-text-secondary uppercase font-bold text-[10px]">Business Date</span>
@@ -116,15 +107,15 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
             </label>
 
             <div className="relative">
-              <div className="absolute left-4 top-1/2 -translate-y-1/2 font-black text-brand-brown text-lg">
+              <span className="absolute left-4 top-1/2 -translate-y-1/2 text-brand-teal font-black text-lg">
                 Rs.
-              </div>
+              </span>
               <input
                 id="opening-cash-input"
                 type="text"
-                placeholder="10,000"
                 value={formatCommaInput(openingRupees)}
-                onChange={(e) => setOpeningRupees(e.target.value.replace(/,/g, ''))}
+                onChange={(e) => setOpeningRupees(e.target.value)}
+                placeholder="10,000"
                 onFocus={(e) => e.target.select()}
                 className="w-full pl-14 pr-4 py-3.5 bg-cream-50 border-2 border-brand-teal rounded-2xl text-xl sm:text-2xl font-black tabular-nums text-brand-brown-deep focus:outline-none focus:ring-4 focus:ring-brand-teal/20"
                 autoFocus
@@ -154,7 +145,7 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
             </div>
           </div>
 
-          {/* Action Buttons: Open with Float, Skip (Rs. 0 Float), or Sign Out */}
+          {/* Action Buttons: Open with Float or Sign Out */}
           <div className="space-y-2 pt-1">
             <button
               id="open-shift-button"
@@ -167,25 +158,15 @@ export const OpenShiftModal: React.FC<OpenShiftModalProps> = ({
               <ArrowRight className="w-4 h-4" />
             </button>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleQuickStartZeroFloat}
-                disabled={isSubmitting}
-                className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl sm:rounded-2xl bg-cream-100 hover:bg-cream-200 text-brand-brown-dark font-extrabold text-xs border border-cream-200 transition-all active:scale-95 cursor-pointer"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-brand-orange" />
-                <span>Skip Float & Start (Rs. 0)</span>
-              </button>
-
+            <div className="flex items-center justify-center pt-1">
               <button
                 type="button"
                 onClick={onLogout}
-                className="flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl sm:rounded-2xl border border-border text-xs font-bold text-text-secondary hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold text-text-secondary hover:bg-rose-50 hover:text-rose-600 transition-colors cursor-pointer"
                 title="Sign out back to login screen"
               >
                 <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
+                <span>Cancel & Sign Out</span>
               </button>
             </div>
           </div>

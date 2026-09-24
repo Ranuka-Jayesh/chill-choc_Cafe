@@ -25,7 +25,6 @@ import {
   Users,
   ShieldCheck,
   Settings,
-  Printer,
   LogOut,
   Menu,
   X,
@@ -190,7 +189,6 @@ export const AdminLayout: React.FC = () => {
     {
       title: 'System & Config',
       items: [
-        { label: 'Receipt Studio', to: '/admin/receipt-customizer', icon: <Printer className="w-4 h-4" /> },
         { label: 'Staff & Users', to: '/admin/users', icon: <Users className="w-4 h-4" /> },
         { label: 'System Settings', to: '/admin/settings', icon: <Settings className="w-4 h-4" /> },
       ],
@@ -202,6 +200,7 @@ export const AdminLayout: React.FC = () => {
   const currentPageTitle = currentItem?.label || 'Administration';
 
   const timeString = currentTime.toLocaleTimeString('en-US', {
+    timeZone: 'Asia/Colombo',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -209,6 +208,7 @@ export const AdminLayout: React.FC = () => {
   });
 
   const dateString = currentTime.toLocaleDateString('en-US', {
+    timeZone: 'Asia/Colombo',
     weekday: 'short',
     day: 'numeric',
     month: 'short',

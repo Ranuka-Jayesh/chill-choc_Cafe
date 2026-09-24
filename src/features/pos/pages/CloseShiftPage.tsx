@@ -31,25 +31,40 @@ import { toast } from 'sonner';
 export const CloseShiftPage: React.FC = () => {
   const navigate = useNavigate();
   const { session, logout } = useAuthStore();
-  const rawShift = shiftService.getActiveShift(session?.user.id, session?.terminalId);
-  const shift =
-    rawShift ||
-    (session
-      ? shiftService.getOrCreateActiveShift({
-          cashierId: session.user.id,
-          cashierName: session.user.name,
-          terminalId: session.terminalId || 'term_01',
-          terminalName: 'Main Counter POS-01',
-        })
-      : null);
+  const shift = shiftService.getActiveShift(session?.user.id, session?.terminalId);
   const settings = db.getSnapshot().settings;
 
+  useEffect(() => {
+    if (session && !shift) {
+      toast.info('No active shift found. Starting a new shift.', { id: 'no-active-shift' });
+      navigate('/pos');
+    }
+  }, [session, shift, navigate]);
+
+  const expectedCashCents = shift
+    ? (shift.openingCash || 0) +
+      (shift.cashSales || 0) +
+      (shift.cashIn || 0) -
+      (shift.cashOut || 0) -
+      (shift.cashRefunds || 0) -
+      (shift.cashDrops || 0)
+    : 0;
+
   const [step, setStep] = useState<'COUNT' | 'RECONCILIATION'>('COUNT');
-  const [actualRupees, setActualRupees] = useState<string>('');
+  const [actualRupees, setActualRupees] = useState<string>(() =>
+    expectedCashCents > 0 ? formatCommaInput((expectedCashCents / 100).toString()) : '0'
+  );
   const [notes, setNotes] = useState<string>('');
   const [isClosing, setIsClosing] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-sync exact expected cash if empty
+  useEffect(() => {
+    if (!actualRupees && expectedCashCents > 0) {
+      setActualRupees(formatCommaInput((expectedCashCents / 100).toString()));
+    }
+  }, [expectedCashCents]);
 
   // Auto-focus input on mount or when switching to COUNT
   useEffect(() => {
@@ -88,15 +103,6 @@ export const CloseShiftPage: React.FC = () => {
     return null;
   }
 
-  const expectedCashCents = shift
-    ? (shift.openingCash || 0) +
-      (shift.cashSales || 0) +
-      (shift.cashIn || 0) -
-      (shift.cashOut || 0) -
-      (shift.cashRefunds || 0) -
-      (shift.cashDrops || 0)
-    : 0;
-
   const actualCents = actualRupees ? rupeesToCents(actualRupees) : expectedCashCents;
   const varianceCents = actualCents - expectedCashCents;
   const isVarianceExceeded =
@@ -109,31 +115,6 @@ export const CloseShiftPage: React.FC = () => {
       setActualRupees(formatCommaInput((expectedCashCents / 100).toString()));
     }
     setStep('RECONCILIATION');
-  };
-
-  const handleSkipAndLogout = async () => {
-    if (isClosing) return;
-    setIsClosing(true);
-    try {
-      if (session) {
-        await shiftService.closeShift({
-          shiftId: shift?.id,
-          closedByUserId: session.user.id,
-          closedByUserName: session.user.name,
-          closingCashEnteredCents: expectedCashCents,
-          closingNotes: 'Direct sign out (cashout skipped)',
-        });
-      }
-      soundService.playLogout();
-      toast.success('Signed out successfully.');
-      await logout();
-      navigate('/pos/login');
-    } catch {
-      await logout();
-      navigate('/pos/login');
-    } finally {
-      setIsClosing(false);
-    }
   };
 
   const handleCompleteClosing = async () => {
@@ -205,23 +186,11 @@ export const CloseShiftPage: React.FC = () => {
 
         <div className="flex items-center gap-2 sm:gap-3">
           {shift && (
-            <div className="hidden md:flex px-3 py-1.5 bg-cream-50 rounded-xl border border-border text-right items-center gap-2">
+            <div className="flex px-3.5 py-1.5 bg-cream-50 rounded-xl border border-border text-right items-center gap-2 shadow-xs">
               <div className="w-2 h-2 rounded-full bg-status-success animate-pulse" />
               <div className="text-xs font-black text-brand-brown-dark">Shift #{shift.shiftNumber}</div>
             </div>
           )}
-
-          {/* Direct Skip Cashout & Sign Out Button */}
-          <button
-            type="button"
-            onClick={handleSkipAndLogout}
-            disabled={isClosing}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-cream-100 hover:bg-rose-50 hover:text-rose-600 hover:border-rose-200 border border-border text-xs font-extrabold text-brand-brown-dark transition-all active:scale-95 cursor-pointer shadow-xs"
-            title="Skip counting and log out immediately"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Skip & Sign Out</span>
-          </button>
         </div>
       </header>
 
@@ -414,25 +383,15 @@ export const CloseShiftPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Advance & Skip Action Buttons */}
-                <div className="space-y-2.5 mt-4">
+                {/* Advance Action Button */}
+                <div className="mt-4">
                   <button
                     id="reconcile-advance-button"
                     type="submit"
                     className="w-full py-3.5 sm:py-4 rounded-2xl bg-brand-teal hover:bg-brand-teal-dark text-white font-black text-xs sm:text-sm shadow-teal transition-all active:scale-[0.99] flex items-center justify-center gap-2 cursor-pointer"
                   >
-                    <span>Compare & Reconcile Drawer (Enter ↵)</span>
+                    <span>Proceed to Reconciliation (Step 2 of 2)</span>
                     <ArrowRight className="w-4 h-4 stroke-[2.5]" />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleSkipAndLogout}
-                    disabled={isClosing}
-                    className="w-full py-2.5 rounded-xl sm:rounded-2xl bg-cream-100 hover:bg-cream-200 text-brand-brown-dark font-extrabold text-xs border border-border/80 transition-all active:scale-95 flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    <LogOut className="w-3.5 h-3.5 text-text-secondary" />
-                    <span>Skip Cashout & Sign Out Immediately</span>
                   </button>
                 </div>
               </form>
@@ -470,7 +429,7 @@ export const CloseShiftPage: React.FC = () => {
                       <span className="font-mono font-bold text-text-primary">+{formatLKR(shift.cashIn)}</span>
                     </div>
                     <div className="flex justify-between items-center py-1.5 border-b border-border/50">
-                      <span className="text-text-secondary">Cash Out (-):</span>
+                      <span className="text-text-secondary">Expenses (-):</span>
                       <span className="font-mono font-bold text-rose-600">-{formatLKR(shift.cashOut)}</span>
                     </div>
                     <div className="flex justify-between items-center py-1.5 border-b border-border/50">

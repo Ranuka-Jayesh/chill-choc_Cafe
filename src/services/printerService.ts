@@ -198,8 +198,10 @@ export const printerService = {
       `       ${settings.businessName.toUpperCase()}      `,
       `    ${settings.tagline.toUpperCase()}   `,
       '================================',
-      settings.address,
-      `Tel: ${settings.phone}`,
+      settings.address && !settings.address.includes('Galle Road')
+        ? settings.address
+        : 'No 447/1 , Debarawewa , Tissamaharama',
+      `Tel: ${settings.phone && !settings.phone.includes('234 5678') ? settings.phone : '076 9007273 Call / WhatsApp'}`,
       '--------------------------------',
       `Order: ${order.orderNumber}`,
       `Type: ${order.orderType === 'DINE_IN' ? 'Dine In' : 'Takeaway'}${order.tableNumber ? `  (Table ${order.tableNumber})` : ''}`,
@@ -284,7 +286,7 @@ export const printerService = {
 
     lines.push('--------------------------------');
     lines.push(settings.receiptFooter || 'Thank you for your visit!');
-    lines.push('  DEVELOPED BY OGO TECHNOLOGY   ');
+    lines.push('   SOFTWARE BY OGO TECHNOLOGY   ');
     lines.push('     www.ogotechnology.net      ');
     lines.push('        +94 75 930 7059         ');
     lines.push('================================');

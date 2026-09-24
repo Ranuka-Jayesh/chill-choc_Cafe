@@ -7,8 +7,9 @@ import { promptDialog } from '@/store/useConfirmStore';
 import { Order, Customer } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatLKR, formatDateTime, formatTime } from '@/utils/format';
+import { toLocalYMD } from '@/services/reportService';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
-import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
+import { DayDatePicker } from '@/components/ui/DayDatePicker';
 import { ThermalReceiptModal } from '@/components/brand/ThermalReceiptModal';
 import { KOTPreviewModal } from '@/components/brand/KOTPreviewModal';
 import { CustomerProfileModal } from '@/features/admin/components/CustomerProfileModal';
@@ -82,15 +83,10 @@ export const AdminOrdersPage: React.FC = () => {
     };
   }, []);
 
-  // Default to current year and current month
-  const now = new Date();
-  const currentYearStr = String(now.getFullYear());
-  const currentMonthStr = String(now.getMonth() + 1);
+  // Default to current date (Today: YYYY-MM-DD in Sri Lanka)
+  const getTodayStr = () => toLocalYMD(new Date());
 
-  const [dateRange, setDateRange] = useState<MonthYearValue>({
-    year: currentYearStr,
-    month: currentMonthStr,
-  });
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr);
 
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [paymentFilter, setPaymentFilter] = useState<string>('ALL');
@@ -133,19 +129,13 @@ export const AdminOrdersPage: React.FC = () => {
   const [viewingReceipt, setViewingReceipt] = useState<Order | null>(null);
   const [viewingKOT, setViewingKOT] = useState<Order | null>(null);
 
-  // Filter orders based on Date Range, Status, Payment and Search
+  // Filter orders based on Selected Date, Status, Payment and Search
   const filteredOrders = useMemo(() => {
     return orders.filter((ord) => {
-      // Date Range Filter
-      if (dateRange.year !== 'ALL' || dateRange.month !== 'ALL') {
-        const orderDate = new Date(ord.createdAt);
-        const orderYear = String(orderDate.getFullYear());
-        const orderMonth = String(orderDate.getMonth() + 1);
-
-        if (dateRange.year !== 'ALL' && orderYear !== dateRange.year) {
-          return false;
-        }
-        if (dateRange.month !== 'ALL' && orderMonth !== dateRange.month) {
+      // Date Filter (YYYY-MM-DD in Sri Lanka)
+      if (selectedDate !== 'ALL') {
+        const orderDateStr = toLocalYMD(ord.createdAt);
+        if (orderDateStr !== selectedDate) {
           return false;
         }
       }
@@ -184,34 +174,18 @@ export const AdminOrdersPage: React.FC = () => {
 
       return true;
     });
-  }, [orders, dateRange, statusFilter, paymentFilter, search]);
+  }, [orders, selectedDate, statusFilter, paymentFilter, search]);
 
-  // Filter customers based on Date Range and Search
+  // Filter customers based on Selected Date and Search
   const filteredCustomers = useMemo(() => {
     return customers.filter((c) => {
-      // Date Range Filter (by last visit, registration, or orders in period)
-      if (dateRange.year !== 'ALL' || dateRange.month !== 'ALL') {
-        const visitDate = new Date(c.lastVisit || c.createdAt);
-        const visitYear = String(visitDate.getFullYear());
-        const visitMonth = String(visitDate.getMonth() + 1);
-
-        if (dateRange.year !== 'ALL' && visitYear !== dateRange.year) {
+      // Date Filter (by last visit, registration, or orders on selected date in Sri Lanka)
+      if (selectedDate !== 'ALL') {
+        const visitDateStr = toLocalYMD(c.lastVisit || c.createdAt);
+        if (visitDateStr !== selectedDate) {
           const custOrders = customerService.getCustomerOrders(c);
-          const hasOrderInYear = custOrders.some(
-            (o) => String(new Date(o.createdAt).getFullYear()) === dateRange.year
-          );
-          if (!hasOrderInYear) return false;
-        }
-
-        if (dateRange.month !== 'ALL') {
-          const custOrders = customerService.getCustomerOrders(c);
-          const hasOrderInMonth = custOrders.some((o) => {
-            const d = new Date(o.createdAt);
-            const yr = String(d.getFullYear());
-            const mo = String(d.getMonth() + 1);
-            return (dateRange.year === 'ALL' || yr === dateRange.year) && mo === dateRange.month;
-          });
-          if (!hasOrderInMonth && visitMonth !== dateRange.month) return false;
+          const hasOrderOnDate = custOrders.some((o) => toLocalYMD(o.createdAt) === selectedDate);
+          if (!hasOrderOnDate) return false;
         }
       }
 
@@ -226,7 +200,7 @@ export const AdminOrdersPage: React.FC = () => {
       }
       return true;
     });
-  }, [customers, dateRange, search]);
+  }, [customers, selectedDate, search]);
 
   const handleApproveRefund = async (order: Order) => {
     const reason = await promptDialog({
@@ -308,27 +282,11 @@ export const AdminOrdersPage: React.FC = () => {
   };
 
   const handleResetFilters = () => {
-    setDateRange({
-      year: currentYearStr,
-      month: currentMonthStr,
-    });
+    setSelectedDate(getTodayStr());
     setStatusFilter('ALL');
     setPaymentFilter('ALL');
     setSearch('');
   };
-
-  const MONTH_NAMES: { [key: string]: string } = {
-    '1': 'January', '2': 'February', '3': 'March', '4': 'April',
-    '5': 'May', '6': 'June', '7': 'July', '8': 'August',
-    '9': 'September', '10': 'October', '11': 'November', '12': 'December',
-  };
-
-  const currentPeriodLabel =
-    dateRange.year === 'ALL' && dateRange.month === 'ALL'
-      ? 'All Time'
-      : dateRange.month === 'ALL'
-      ? `All Months ${dateRange.year}`
-      : `${MONTH_NAMES[dateRange.month] || ''} ${dateRange.year}`;
 
   // If a customer is selected, render the dedicated Customer Details Page View
   if (selectedCustomer) {
@@ -407,10 +365,10 @@ export const AdminOrdersPage: React.FC = () => {
         </div>
 
         {/* Right: Dynamic Filters */}
-        <div className="flex items-center justify-end gap-2 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap justify-start sm:justify-end">
           {viewMode === 'orders' && (
             <>
-              <div className="w-[130px] sm:w-[155px] shrink-0 relative z-30">
+              <div className="w-[130px] sm:w-[155px] relative z-30">
                 <CustomSelect
                   value={statusFilter}
                   onChange={(val) => setStatusFilter(val)}
@@ -419,7 +377,7 @@ export const AdminOrdersPage: React.FC = () => {
                 />
               </div>
 
-              <div className="w-[145px] sm:w-[175px] shrink-0 relative z-30">
+              <div className="w-[145px] sm:w-[175px] relative z-30">
                 <CustomSelect
                   value={paymentFilter}
                   onChange={(val) => setPaymentFilter(val)}
@@ -430,10 +388,10 @@ export const AdminOrdersPage: React.FC = () => {
             </>
           )}
 
-          <div className="shrink-0 relative z-30">
-            <MonthYearPicker
-              value={dateRange}
-              onChange={(newVal) => setDateRange(newVal)}
+          <div className="relative z-30">
+            <DayDatePicker
+              value={selectedDate}
+              onChange={(newVal) => setSelectedDate(newVal)}
             />
           </div>
         </div>
@@ -537,7 +495,7 @@ export const AdminOrdersPage: React.FC = () => {
                   <tr>
                     <td colSpan={8} className="text-center py-16 text-text-muted">
                       <ShoppingBag className="w-8 h-8 mx-auto mb-2 text-text-muted/50" />
-                      <div>No orders found matching the selected year, month, or search filters.</div>
+                      <div>No orders found matching the selected date, status, or search filters.</div>
                       <button
                         onClick={handleResetFilters}
                         className="mt-3 px-3 py-1 text-xs font-bold text-brand-teal hover:underline"
@@ -639,34 +597,34 @@ export const AdminOrdersPage: React.FC = () => {
       {selectedOrder &&
         createPortal(
           <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-brand-brown-deep/60 backdrop-blur-sm animate-in fade-in"
+            className="fixed inset-0 z-50 flex items-center justify-center p-2.5 sm:p-4 md:p-6 bg-brand-brown-deep/60 backdrop-blur-sm animate-in fade-in"
             onClick={() => setSelectedOrder(null)}
           >
             <div
-              className="bg-white rounded-3xl w-full max-w-lg overflow-hidden border border-[#EAE3DA] shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92vh]"
+              className="bg-white rounded-3xl w-full max-w-lg sm:max-w-xl lg:max-w-2xl overflow-hidden border border-[#EAE3DA] shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92vh]"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Modal Header */}
-              <div className="px-5 sm:px-6 py-4 bg-white border-b border-[#EAE3DA] flex items-center justify-between shrink-0">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-brand-teal-light text-brand-teal-dark flex items-center justify-center shadow-2xs font-extrabold text-xs">
+              <div className="px-4 sm:px-6 py-3.5 sm:py-4 bg-white border-b border-[#EAE3DA] flex items-center justify-between shrink-0 gap-2">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-brand-teal-light text-brand-teal-dark flex items-center justify-center shadow-2xs font-extrabold text-xs shrink-0">
                     <ShoppingBag className="w-4 h-4 text-brand-teal" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="font-extrabold text-base text-brand-brown-dark">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-extrabold text-base text-brand-brown-dark truncate">
                         Order Details {selectedOrder.orderNumber}
                       </h3>
                       {selectedOrder.status === 'REFUND_PENDING' || selectedOrder.refundStatus === 'PENDING_APPROVAL' ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-500 text-white shadow-xs animate-pulse">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-amber-500 text-white shadow-xs animate-pulse whitespace-nowrap">
                           Refund Pending
                         </span>
                       ) : selectedOrder.status === 'REFUNDED' || selectedOrder.refundStatus === 'APPROVED' ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-status-danger-bg text-status-danger">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-status-danger-bg text-status-danger whitespace-nowrap">
                           Refunded
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-status-success-bg text-status-success">
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-status-success-bg text-status-success whitespace-nowrap">
                           {selectedOrder.status}
                         </span>
                       )}
@@ -677,45 +635,45 @@ export const AdminOrdersPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setSelectedOrder(null)}
-                  className="p-1.5 rounded-full text-text-muted hover:bg-cream-100 hover:text-brand-brown-dark transition-colors cursor-pointer"
+                  className="p-1.5 rounded-full text-text-muted hover:bg-cream-100 hover:text-brand-brown-dark transition-colors cursor-pointer shrink-0"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
               {/* Modal Body */}
-              <div className="p-5 sm:p-6 overflow-y-auto space-y-4 flex-1 custom-scrollbar">
+              <div className="p-4 sm:p-6 overflow-y-auto space-y-4 flex-1 custom-scrollbar">
                 {/* Pending Refund Alert Card for Admin Approval */}
                 {(selectedOrder.status === 'REFUND_PENDING' || selectedOrder.refundStatus === 'PENDING_APPROVAL') && (
-                  <div className="p-3.5 bg-amber-50 rounded-2xl border border-amber-300 text-xs space-y-2 text-amber-950 shadow-2xs">
-                    <div className="flex items-center justify-between">
+                  <div className="p-3.5 sm:p-4 bg-amber-50 rounded-2xl border border-amber-300 text-xs space-y-2.5 text-amber-950 shadow-2xs">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
                       <div className="flex items-center gap-1.5 font-bold text-xs uppercase text-amber-900">
                         <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                         <span>Refund Request (Awaiting Admin Confirmation)</span>
                       </div>
-                      <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-500 text-white">
+                      <span className="self-start sm:self-auto text-[10px] font-black px-2.5 py-0.5 rounded-full bg-amber-500 text-white shrink-0">
                         Action Required
                       </span>
                     </div>
 
-                    <div className="space-y-1 text-xs text-amber-900 pt-1 border-t border-amber-200/80">
-                      <div className="flex justify-between">
-                        <span>Requested By:</span>
-                        <strong className="text-brand-brown-dark">{selectedOrder.refundRequest?.requestedByUserName || selectedOrder.cashierName || 'Cashier'}</strong>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-amber-900 pt-2 border-t border-amber-200/80">
+                      <div className="flex justify-between sm:block">
+                        <span className="text-amber-800/80 text-[11px] sm:block">Requested By: </span>
+                        <strong className="text-brand-brown-dark font-extrabold sm:block">{selectedOrder.refundRequest?.requestedByUserName || selectedOrder.cashierName || 'Cashier'}</strong>
                       </div>
                       {selectedOrder.refundRequest?.requestedAt && (
-                        <div className="flex justify-between text-[11px] text-text-secondary">
-                          <span>Requested At:</span>
-                          <span>{formatDateTime(selectedOrder.refundRequest.requestedAt)}</span>
+                        <div className="flex justify-between sm:block">
+                          <span className="text-amber-800/80 text-[11px] sm:block">Requested At: </span>
+                          <span className="font-medium text-text-secondary sm:block">{formatDateTime(selectedOrder.refundRequest.requestedAt)}</span>
                         </div>
                       )}
-                      <div className="flex justify-between">
-                        <span>Reason:</span>
-                        <strong className="text-amber-900">{selectedOrder.refundReason || selectedOrder.refundRequest?.reason || 'Customer returned item'}</strong>
+                      <div className="flex justify-between sm:block">
+                        <span className="text-amber-800/80 text-[11px] sm:block">Reason: </span>
+                        <strong className="text-amber-950 font-bold sm:block">{selectedOrder.refundReason || selectedOrder.refundRequest?.reason || 'Customer returned item'}</strong>
                       </div>
-                      <div className="flex justify-between pt-1 font-bold">
-                        <span>Refund Amount:</span>
-                        <strong className="text-rose-700 font-black text-sm">
+                      <div className="flex justify-between sm:block">
+                        <span className="text-amber-800/80 text-[11px] sm:block">Refund Amount: </span>
+                        <strong className="text-rose-700 font-black text-sm sm:text-base tabular-nums sm:block">
                           {formatLKR(selectedOrder.refundedAmountCents || selectedOrder.refundRequest?.amountCents || selectedOrder.totalCents)}
                         </strong>
                       </div>
@@ -724,7 +682,7 @@ export const AdminOrdersPage: React.FC = () => {
                 )}
 
                 {/* Minimal Order Meta Header Row */}
-                <div className="flex items-center justify-between pb-3 border-b border-zinc-200 text-xs text-text-secondary">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 pb-3 border-b border-zinc-200 text-xs text-text-secondary">
                   <div className="flex items-center gap-2">
                     <span className="font-black text-brand-brown-dark text-xs">
                       {selectedOrder.orderType === 'DINE_IN'
@@ -736,9 +694,9 @@ export const AdminOrdersPage: React.FC = () => {
                       {selectedOrder.paymentMethod}
                     </span>
                   </div>
-                  <div className="text-right text-[11px] text-text-muted">
+                  <div className="text-left sm:text-right text-[11px] text-text-muted flex items-center gap-1 sm:justify-end flex-wrap">
                     <span>{formatDateTime(selectedOrder.createdAt)}</span>
-                    <span className="mx-1 text-zinc-300">•</span>
+                    <span className="text-zinc-300">•</span>
                     <span>Staff: <strong className="text-brand-brown-dark font-bold">{selectedOrder.cashierName}</strong></span>
                   </div>
                 </div>
@@ -862,44 +820,46 @@ export const AdminOrdersPage: React.FC = () => {
               </div>
 
               {/* Bottom Card Footer with Actions */}
-              <div className="px-5 sm:px-6 py-3.5 bg-[#FAF7F2] border-t border-[#EAE3DA] flex items-center justify-between gap-2 shrink-0">
-                <div className="flex items-center gap-2">
+              <div className="px-4 sm:px-6 py-3.5 bg-[#FAF7F2] border-t border-[#EAE3DA] flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 sm:gap-3 shrink-0">
+                {/* Left: Print & Ticket actions */}
+                <div className="flex items-center gap-2 w-full sm:w-auto">
                   <button
                     type="button"
                     onClick={() => setViewingKOT(selectedOrder)}
-                    className="flex items-center gap-1.5 px-3.5 py-2 bg-white border border-[#E0D7CC] hover:bg-cream-100 rounded-2xl text-xs font-bold text-brand-brown shadow-xs transition-all cursor-pointer"
+                    className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-white border border-[#E0D7CC] hover:bg-cream-100 rounded-2xl text-xs font-bold text-brand-brown shadow-xs transition-all cursor-pointer active:scale-95"
                   >
-                    <Utensils className="w-3.5 h-3.5 text-[#E99343]" />
+                    <Utensils className="w-3.5 h-3.5 text-[#E99343] shrink-0" />
                     <span>KOT Ticket</span>
                   </button>
 
                   <button
                     type="button"
                     onClick={() => setViewingReceipt(selectedOrder)}
-                    className="flex items-center gap-1.5 px-4 py-2 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-2xl text-xs font-extrabold shadow-teal transition-all active:scale-95 cursor-pointer"
+                    className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-4 py-2.5 bg-brand-teal hover:bg-brand-teal-dark text-white rounded-2xl text-xs font-extrabold shadow-teal transition-all active:scale-95 cursor-pointer"
                   >
-                    <Printer className="w-3.5 h-3.5" />
+                    <Printer className="w-3.5 h-3.5 shrink-0" />
                     <span>Print Receipt</span>
                   </button>
                 </div>
 
-                <div className="flex items-center gap-2">
+                {/* Right: Decision & Close actions */}
+                <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 w-full sm:w-auto justify-end">
                   {selectedOrder.status === 'REFUND_PENDING' || selectedOrder.refundStatus === 'PENDING_APPROVAL' ? (
                     <>
                       <button
                         type="button"
                         onClick={() => handleApproveRefund(selectedOrder)}
-                        className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-black shadow-md transition-all active:scale-95 cursor-pointer"
+                        className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-black shadow-md transition-all active:scale-95 cursor-pointer whitespace-nowrap"
                       >
-                        <Check className="w-4 h-4" />
+                        <Check className="w-4 h-4 shrink-0" />
                         <span>Confirm & Approve Refund</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => handleRejectRefund(selectedOrder)}
-                        className="flex items-center gap-1 px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-2xl text-xs font-bold transition-all cursor-pointer"
+                        className="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-2xl text-xs font-bold transition-all cursor-pointer active:scale-95 flex items-center justify-center gap-1 shrink-0"
                       >
-                        <X className="w-3.5 h-3.5" />
+                        <X className="w-3.5 h-3.5 shrink-0" />
                         <span>Reject</span>
                       </button>
                     </>
@@ -907,9 +867,9 @@ export const AdminOrdersPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleDirectRefund(selectedOrder)}
-                      className="flex items-center gap-1 px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-2xl text-xs font-bold transition-all cursor-pointer"
+                      className="flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-4 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-2xl text-xs font-bold transition-all cursor-pointer active:scale-95 whitespace-nowrap"
                     >
-                      <RotateCcw className="w-3.5 h-3.5" />
+                      <RotateCcw className="w-3.5 h-3.5 shrink-0" />
                       <span>Direct Refund</span>
                     </button>
                   ) : null}
@@ -917,7 +877,7 @@ export const AdminOrdersPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setSelectedOrder(null)}
-                    className="px-4 py-2 rounded-2xl border border-[#E0D7CC] bg-white hover:bg-cream-100 text-text-primary text-xs font-bold transition-all cursor-pointer"
+                    className="px-4 py-2.5 rounded-2xl border border-[#E0D7CC] bg-white hover:bg-cream-100 text-text-primary text-xs font-bold transition-all cursor-pointer active:scale-95 shrink-0 flex items-center justify-center"
                   >
                     Close
                   </button>

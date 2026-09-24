@@ -5,6 +5,7 @@ import { Toaster } from 'sonner';
 import { CheckCircle2, AlertCircle, AlertTriangle, Info, Loader2 } from 'lucide-react';
 import { GlobalConfirmModal } from './components/ui/GlobalConfirmModal';
 import { RealtimeNotificationListener } from './components/common/RealtimeNotificationListener';
+import { NightlyShiftWatcher } from './components/common/NightlyShiftWatcher';
 import { router } from './app/router';
 
 const queryClient = new QueryClient({
@@ -22,6 +23,7 @@ export const App: React.FC = () => {
       <RouterProvider router={router} />
       <GlobalConfirmModal />
       <RealtimeNotificationListener />
+      <NightlyShiftWatcher />
       <Toaster
         position="top-center"
         closeButton

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { cashDrawerService } from '@/services/cashDrawerService';
+import { catalogService } from '@/services/catalogService';
 import { db } from '@/services/storage/db';
 import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { CashierShift, CashDrawerTransaction, User } from '@/types';
@@ -226,19 +227,36 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
       });
       toast.success(`Cash In of ${formatLKR(amountCents)} added to drawer.`);
     } else if (tab === 'CASH_OUT') {
-      cashDrawerService.requestCashMovement({
+      const expTitle = reason.trim() || 'Operating Expense';
+
+      // 1. Directly add to expenses database table
+      catalogService.addExpense({
+        title: expTitle,
+        category: expenseCategory,
+        amountCents,
+        paidViaDrawer: true,
         shiftId: shift.id,
-        terminalId: shift.terminalId,
+        cashierId: user.id,
+        cashierName: user.name,
+      });
+
+      // 2. Directly record approved CASH_OUT in drawer ledger and deduct balance
+      cashDrawerService.addTransaction({
+        shiftId: shift.id,
+        terminalId: shift.terminalId || 'POS-01',
         cashierId: user.id,
         cashierName: user.name,
         type: 'CASH_OUT',
-        amount: amountCents,
-        reason: reason.trim(),
+        amount: -amountCents,
+        reason: expTitle,
         expenseCategory,
+        status: 'APPROVED',
       });
+
       toast.success(
-        `Cash Out request of ${formatLKR(amountCents)} submitted to Admin for authorization.`
+        `Expense of ${formatLKR(amountCents)} recorded and deducted from cash drawer.`
       );
+      setReason('');
     } else if (tab === 'CASH_DROP') {
       cashDrawerService.requestCashMovement({
         shiftId: shift.id,
@@ -283,7 +301,8 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
       t.type === 'CASH_IN' ||
       t.type === 'CASH_OUT' ||
       t.type === 'CASH_DROP' ||
-      t.type === 'CLOSING_ADJUSTMENT'
+      t.type === 'CLOSING_ADJUSTMENT' ||
+      t.type === 'SHIFT_CLOSE'
   );
 
   return (
@@ -333,7 +352,7 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
                   }`}
                 >
                   <ArrowUpRight className="w-4 h-4 stroke-[2.2]" />
-                  <span>Cash Out</span>
+                  <span>Expenses</span>
                 </button>
 
                 <button
@@ -401,14 +420,21 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
 
               {/* Quick Cash Presets */}
               <div className="grid grid-cols-3 gap-1.5 pt-1">
-                <button
-                  type="button"
-                  onClick={() => handlePresetAmount(currentBalance / 100)}
-                  className="py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs font-black text-amber-900 transition-colors cursor-pointer active:scale-95 shadow-2xs"
-                >
-                  All Cash
-                </button>
-                {[500, 1000, 2000, 3000, 5000].map((preset) => (
+                {tab === 'CASH_DROP' && (
+                  <button
+                    type="button"
+                    onClick={() => handlePresetAmount(currentBalance / 100)}
+                    className="py-2 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-xs font-black text-amber-900 transition-colors cursor-pointer active:scale-95 shadow-2xs"
+                  >
+                    All Cash
+                  </button>
+                )}
+                {(tab === 'CASH_OUT'
+                  ? [250, 500, 1000, 2000, 3000, 5000]
+                  : tab === 'CASH_IN'
+                  ? [500, 1000, 2000, 3000, 5000, 10000]
+                  : [500, 1000, 2000, 3000, 5000]
+                ).map((preset) => (
                   <button
                     key={preset}
                     type="button"
@@ -532,6 +558,11 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
                       <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                       <span>Instant float addition to register drawer.</span>
                     </div>
+                  ) : tab === 'CASH_OUT' ? (
+                    <div className="text-[11px] font-semibold text-emerald-800 flex items-center gap-1.5">
+                      <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span>Directly deducts from drawer balance and updates expenses.</span>
+                    </div>
                   ) : (
                     <div className="text-[11px] font-semibold text-amber-900 flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
@@ -561,7 +592,7 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
                 </div>
                 <div className="p-2.5 bg-[#FAF7F2] rounded-xl border border-[#EAE3DA] space-y-0.5">
                   <span className="text-[9px] uppercase font-bold text-rose-700 block truncate">
-                    Cash Out {summaryStats.cashOutPending > 0 ? `(${formatLKR(summaryStats.cashOutPending)} pend)` : ''}
+                    Expenses {summaryStats.cashOutPending > 0 ? `(${formatLKR(summaryStats.cashOutPending)} pend)` : ''}
                   </span>
                   <span className="font-mono font-black text-rose-700 text-xs sm:text-sm truncate block">
                     {formatLKR(summaryStats.cashOutApproved)}
@@ -597,9 +628,10 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
 
                       let typeLabel = item.type.replace(/_/g, ' ');
                       if (item.type === 'OPENING_CASH') typeLabel = 'Login Float';
-                      if (item.type === 'CASH_OUT') typeLabel = 'Cash Out';
+                      if (item.type === 'CASH_OUT') typeLabel = 'Expense';
                       if (item.type === 'CASH_DROP') typeLabel = 'Safe Drop';
                       if (item.type === 'CASH_IN') typeLabel = 'Cash In';
+                      if (item.type === 'SHIFT_CLOSE') typeLabel = 'Shift Cashout';
 
                       return (
                         <div
@@ -608,7 +640,7 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
                         >
                           {/* Single Line Info (Type • Time • Reason) */}
                           <div className="flex items-center gap-2 min-w-0 flex-1">
-                            <span className="font-extrabold text-brand-brown-dark text-xs sm:text-sm shrink-0">
+                            <span className={`font-extrabold text-xs sm:text-sm shrink-0 ${item.type === 'SHIFT_CLOSE' ? 'text-purple-700' : 'text-brand-brown-dark'}`}>
                               {typeLabel}
                             </span>
                             <span className="text-[10.5px] sm:text-[11px] text-text-muted shrink-0">
@@ -622,7 +654,7 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
 
                           {/* Single Line Right (Amount + Status Badge) */}
                           <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-                            <span className="font-mono font-black text-brand-brown-dark text-xs sm:text-sm tabular-nums">
+                            <span className={`font-mono font-black text-xs sm:text-sm tabular-nums ${item.type === 'SHIFT_CLOSE' ? 'text-purple-700' : 'text-brand-brown-dark'}`}>
                               {formatLKR(Math.abs(item.amount))}
                             </span>
                             {isPending && (
@@ -671,8 +703,8 @@ export const CashInOutModal: React.FC<CashInOutModalProps> = ({
                   </>
                 ) : tab === 'CASH_OUT' ? (
                   <>
-                    <Clock className="w-4 h-4 sm:w-5 sm:h-5" />
-                    <span>Submit Cash Out Request</span>
+                    <Check className="w-4 h-4 sm:w-5 sm:h-5" />
+                    <span>Confirm & Deduct Expense</span>
                   </>
                 ) : (
                   <>

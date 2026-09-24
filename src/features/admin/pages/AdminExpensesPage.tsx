@@ -27,7 +27,7 @@ import {
   Tag,
 } from 'lucide-react';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
-import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
+import { DayDatePicker } from '@/components/ui/DayDatePicker';
 import { useAuthStore } from '@/store/useAuthStore';
 import { confirmDialog } from '@/store/useConfirmStore';
 import { toast } from 'sonner';
@@ -57,15 +57,13 @@ export const AdminExpensesPage: React.FC = () => {
   const [expenses, setExpenses] = useState(catalogService.getExpenses());
   const [activeShift, setActiveShift] = useState(shiftService.getActiveShift());
 
-  // Date Range (defaults to current year/month)
-  const now = new Date();
-  const currentMonthStr = String(now.getMonth() + 1);
-  const currentYearStr = String(now.getFullYear());
+  // Date Filter (defaults to current date YYYY-MM-DD)
+  const getTodayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
 
-  const [dateRange, setDateRange] = useState<MonthYearValue>({
-    year: currentYearStr,
-    month: currentMonthStr,
-  });
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr);
 
   // Search & Filters
   const [categoryFilter, setCategoryFilter] = useState('ALL');
@@ -94,11 +92,11 @@ export const AdminExpensesPage: React.FC = () => {
       // Category Filter
       if (categoryFilter !== 'ALL' && exp.category !== categoryFilter) return false;
 
-      // Month & Year Filter
-      if (dateRange.year !== 'ALL') {
+      // Date Filter (YYYY-MM-DD)
+      if (selectedDate !== 'ALL') {
         const expDate = new Date(exp.createdAt);
-        if (String(expDate.getFullYear()) !== dateRange.year) return false;
-        if (dateRange.month !== 'ALL' && String(expDate.getMonth() + 1) !== dateRange.month) return false;
+        const expDateStr = `${expDate.getFullYear()}-${String(expDate.getMonth() + 1).padStart(2, '0')}-${String(expDate.getDate()).padStart(2, '0')}`;
+        if (expDateStr !== selectedDate) return false;
       }
 
       // Text Search
@@ -113,7 +111,7 @@ export const AdminExpensesPage: React.FC = () => {
 
       return true;
     });
-  }, [expenses, categoryFilter, dateRange, search]);
+  }, [expenses, categoryFilter, selectedDate, search]);
 
   // Overall & Filtered KPI stats
   const totalFilteredExpenseCents = useMemo(() => {
@@ -359,9 +357,9 @@ export const AdminExpensesPage: React.FC = () => {
             />
           </div>
 
-          <MonthYearPicker
-            value={dateRange}
-            onChange={(newVal) => setDateRange(newVal)}
+          <DayDatePicker
+            value={selectedDate}
+            onChange={(newVal) => setSelectedDate(newVal)}
           />
         </div>
       </div>

@@ -11,7 +11,6 @@ import {
   Maximize,
   Minimize,
   LogOut,
-  Printer,
   Coins,
   PauseCircle,
   Receipt,
@@ -29,7 +28,6 @@ interface PosHeaderProps {
   onOpenAttendance?: () => void;
   onOpenStockDrawer?: () => void;
   onOpenCashInOut: () => void;
-  onOpenPrinterManager: () => void;
   onOpenHeldOrders: () => void;
   onLogoutClick: () => void;
   onOpenQuickDemoMenu?: () => void;
@@ -43,7 +41,6 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
   onOpenAttendance,
   onOpenStockDrawer,
   onOpenCashInOut,
-  onOpenPrinterManager,
   onOpenHeldOrders,
   onLogoutClick,
   onOpenQuickDemoMenu,
@@ -52,9 +49,6 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [heldOrdersCount, setHeldOrdersCount] = useState(
     db.getSnapshot().heldOrders?.length || 0
-  );
-  const [failedPrintJobsCount, setFailedPrintJobsCount] = useState(
-    (db.getSnapshot().printerJobs || []).filter((j) => j.status === 'FAILED').length
   );
   const [drawerBalanceCents, setDrawerBalanceCents] = useState<number>(() =>
     shift ? cashDrawerService.getCurrentDrawerBalance(shift.id) : 0
@@ -84,9 +78,6 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
         setDrawerBalanceCents(0);
       }
       setHeldOrdersCount(db.getSnapshot().heldOrders?.length || 0);
-      setFailedPrintJobsCount(
-        (db.getSnapshot().printerJobs || []).filter((j) => j.status === 'FAILED').length
-      );
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const allIngs = db.getSnapshot().ingredients || [];
@@ -305,21 +296,6 @@ export const PosHeader: React.FC<PosHeaderProps> = ({
           <Truck className="w-4 h-4 sm:w-4.5 sm:h-4.5 stroke-[2.2]" />
         </button>
 
-        {/* Printer Management Button */}
-        <button
-          onClick={onOpenPrinterManager}
-          className={`relative h-10 w-10 sm:h-11 sm:w-11 rounded-xl sm:rounded-2xl flex items-center justify-center border shadow-xs transition-all active:scale-95 cursor-pointer ${
-            failedPrintJobsCount > 0
-              ? 'bg-rose-50 text-rose-600 border-rose-200 animate-pulse'
-              : 'text-text-secondary hover:text-brand-teal hover:bg-cream-100 border-border/80'
-          }`}
-          title="Printer Configuration & Queue"
-        >
-          <Printer className="w-3.5 h-3.5 sm:w-4 sm:h-4 stroke-[2]" />
-          {failedPrintJobsCount > 0 && (
-            <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-rose-500 rounded-full ring-2 ring-white" />
-          )}
-        </button>
 
         {/* Fullscreen Toggle */}
         <button

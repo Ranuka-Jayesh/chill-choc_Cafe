@@ -1,6 +1,25 @@
 import { db } from './storage/db';
 import { Order, CashierShift } from '@/types';
 
+/**
+ * Convert any ISO timestamp or Date input into Sri Lankan local YYYY-MM-DD.
+ * Strictly pinned to Asia/Colombo so server/client timezone differences never skew dates.
+ */
+export const toLocalYMD = (dateInput?: string | number | Date | null): string => {
+  if (!dateInput) return '';
+  if (typeof dateInput === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateInput)) {
+    return dateInput;
+  }
+  const d = typeof dateInput === 'string' || typeof dateInput === 'number' ? new Date(dateInput) : dateInput;
+  if (!d || isNaN(d.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Colombo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+};
+
 export interface DailyReportSummary {
   date: string;
   grossSalesCents: number;
@@ -19,107 +38,18 @@ export interface DailyReportSummary {
   expectedClosingCents: number;
   actualClosingCents: number;
   varianceCents: number;
+  closedAuditedCount: number;
+  liveDrawerBalanceCents: number;
 }
 
 export const reportService = {
   getDailyReport: (targetDateStr?: string): DailyReportSummary => {
-    const data = db.getSnapshot();
-    const today = new Date();
-    const todayIso = today.toISOString().split('T')[0];
-    const targetDate = targetDateStr || todayIso;
-
-    const dayOrders = data.orders.filter((o) => {
-      if (targetDateStr) {
-        return o.createdAt.startsWith(targetDateStr);
-      }
-      const ordDate = new Date(o.createdAt);
-      const isSameDay =
-        ordDate.getFullYear() === today.getFullYear() &&
-        ordDate.getMonth() === today.getMonth() &&
-        ordDate.getDate() === today.getDate();
-      return isSameDay || o.createdAt.startsWith(todayIso);
-    });
-    const completedOrders = dayOrders.filter((o) => o.status === 'COMPLETED');
-    const refundedOrders = dayOrders.filter((o) => o.status === 'REFUNDED' || o.status === 'PARTIALLY_REFUNDED');
-
-    let grossSalesCents = 0;
-    let discountCents = 0;
-    let cashSalesCents = 0;
-    let cardSalesCents = 0;
-    let qrSalesCents = 0;
-
-    for (const order of dayOrders) {
-      grossSalesCents += order.subtotalCents;
-      discountCents += order.discountCents;
-
-      if (order.status !== 'CANCELLED') {
-        if (order.paymentMethod === 'CASH') {
-          cashSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'CARD') {
-          cardSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'QR') {
-          qrSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'SPLIT' && order.paymentSplits) {
-          order.paymentSplits.forEach((sp) => {
-            if (sp.method === 'CASH') cashSalesCents += sp.amountCents;
-            if (sp.method === 'CARD') cardSalesCents += sp.amountCents;
-            if (sp.method === 'QR') qrSalesCents += sp.amountCents;
-          });
-        }
-      }
-    }
-
-    let refundsCents = 0;
-    refundedOrders.forEach((o) => {
-      refundsCents += o.refundedAmountCents || o.totalCents;
-    });
-
-    const netSalesCents = Math.max(0, grossSalesCents - discountCents - refundsCents);
-    const orderCount = completedOrders.length;
-    const avgOrderValueCents = orderCount > 0 ? Math.round(netSalesCents / orderCount) : 0;
-
-    // Shift figures for today
-    const dayShifts = data.shifts.filter((s) => s.businessDate === targetDate);
-    let openingFloatCents = 0;
-    let cashInCents = 0;
-    let cashOutCents = 0;
-    let cashRefundsCents = 0;
-    let actualClosingCents = 0;
-    let expectedClosingCents = 0;
-
-    dayShifts.forEach((s) => {
-      openingFloatCents += s.openingCash;
-      cashInCents += s.cashIn;
-      cashOutCents += s.cashOut;
-      cashRefundsCents += s.cashRefunds;
-      actualClosingCents += s.closingCashEntered || 0;
-      expectedClosingCents += s.expectedClosingCash || (s.openingCash + s.cashSales + s.cashIn - s.cashRefunds - s.cashOut);
-    });
-
-    const varianceCents = actualClosingCents - expectedClosingCents;
-
-    return {
-      date: targetDate,
-      grossSalesCents,
-      discountCents,
-      refundsCents,
-      netSalesCents,
-      cashSalesCents,
-      cardSalesCents,
-      qrSalesCents,
-      orderCount,
-      avgOrderValueCents,
-      openingFloatCents,
-      cashInCents,
-      cashOutCents,
-      cashRefundsCents,
-      expectedClosingCents,
-      actualClosingCents,
-      varianceCents,
-    };
+    const todayLocal = toLocalYMD(new Date());
+    const targetDate = targetDateStr ? toLocalYMD(targetDateStr) : todayLocal;
+    return reportService.getReportForDateRange(targetDate, targetDate);
   },
 
-  getCategorySales: (): { categoryName: string; revenueCents: number; itemsCount: number }[] => {
+  getCategorySales: (startDateStr?: string, endDateStr?: string): { categoryName: string; revenueCents: number; itemsCount: number }[] => {
     const data = db.getSnapshot();
     const categoryMap = new Map<string, { categoryName: string; revenueCents: number; itemsCount: number }>();
 
@@ -129,6 +59,10 @@ export const reportService = {
 
     data.orders.forEach((ord) => {
       if (ord.status === 'CANCELLED') return;
+      if (startDateStr && endDateStr) {
+        const orderDate = toLocalYMD(ord.createdAt);
+        if (orderDate < startDateStr || orderDate > endDateStr) return;
+      }
       ord.items.forEach((it) => {
         const prod = data.products.find((p) => p.id === it.productId);
         const catId = prod?.categoryId || 'cat_coffee';
@@ -146,7 +80,7 @@ export const reportService = {
     const data = db.getSnapshot();
 
     const rangeOrders = data.orders.filter((o) => {
-      const orderDate = o.createdAt.split('T')[0];
+      const orderDate = toLocalYMD(o.createdAt);
       return orderDate >= startDateStr && orderDate <= endDateStr;
     });
     const completedOrders = rangeOrders.filter((o) => o.status === 'COMPLETED');
@@ -154,62 +88,102 @@ export const reportService = {
 
     let grossSalesCents = 0;
     let discountCents = 0;
-    let cashSalesCents = 0;
-    let cardSalesCents = 0;
-    let qrSalesCents = 0;
+    let grossCashSalesCents = 0;
+    let grossCardSalesCents = 0;
+    let grossQrSalesCents = 0;
 
     for (const order of rangeOrders) {
+      if (order.status === 'CANCELLED') continue;
+
       grossSalesCents += order.subtotalCents;
       discountCents += order.discountCents;
 
-      if (order.status !== 'CANCELLED') {
-        if (order.paymentMethod === 'CASH') {
-          cashSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'CARD') {
-          cardSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'QR') {
-          qrSalesCents += order.totalCents;
-        } else if (order.paymentMethod === 'SPLIT' && order.paymentSplits) {
-          order.paymentSplits.forEach((sp) => {
-            if (sp.method === 'CASH') cashSalesCents += sp.amountCents;
-            if (sp.method === 'CARD') cardSalesCents += sp.amountCents;
-            if (sp.method === 'QR') qrSalesCents += sp.amountCents;
-          });
-        }
+      if (order.paymentMethod === 'CASH') {
+        grossCashSalesCents += order.totalCents;
+      } else if (order.paymentMethod === 'CARD') {
+        grossCardSalesCents += order.totalCents;
+      } else if (order.paymentMethod === 'QR') {
+        grossQrSalesCents += order.totalCents;
+      } else if (order.paymentMethod === 'SPLIT' && order.paymentSplits) {
+        order.paymentSplits.forEach((sp) => {
+          if (sp.method === 'CASH') grossCashSalesCents += sp.amountCents;
+          if (sp.method === 'CARD') grossCardSalesCents += sp.amountCents;
+          if (sp.method === 'QR') grossQrSalesCents += sp.amountCents;
+        });
       }
     }
 
     let refundsCents = 0;
+    let cashRefundsCents = 0;
+    let cardRefundsCents = 0;
+    let qrRefundsCents = 0;
+
     refundedOrders.forEach((o) => {
-      refundsCents += o.refundedAmountCents || o.totalCents;
+      const refAmt = o.refundedAmountCents || o.totalCents;
+      refundsCents += refAmt;
+
+      if (o.paymentMethod === 'CASH') {
+        cashRefundsCents += refAmt;
+      } else if (o.paymentMethod === 'CARD') {
+        cardRefundsCents += refAmt;
+      } else if (o.paymentMethod === 'QR') {
+        qrRefundsCents += refAmt;
+      } else if (o.paymentMethod === 'SPLIT' && o.paymentSplits && o.totalCents > 0) {
+        const ratio = Math.min(1, refAmt / o.totalCents);
+        o.paymentSplits.forEach((sp) => {
+          if (sp.method === 'CASH') cashRefundsCents += Math.round(sp.amountCents * ratio);
+          if (sp.method === 'CARD') cardRefundsCents += Math.round(sp.amountCents * ratio);
+          if (sp.method === 'QR') qrRefundsCents += Math.round(sp.amountCents * ratio);
+        });
+      } else {
+        cashRefundsCents += refAmt;
+      }
     });
 
     const netSalesCents = Math.max(0, grossSalesCents - discountCents - refundsCents);
+    const cashSalesCents = Math.max(0, grossCashSalesCents - cashRefundsCents);
+    const cardSalesCents = Math.max(0, grossCardSalesCents - cardRefundsCents);
+    const qrSalesCents = Math.max(0, grossQrSalesCents - qrRefundsCents);
+
     const orderCount = completedOrders.length;
     const avgOrderValueCents = orderCount > 0 ? Math.round(netSalesCents / orderCount) : 0;
 
     // Shift figures for range
     const rangeShifts = data.shifts.filter((s) => {
-      const shiftDate = s.businessDate || s.openedAt.split('T')[0];
+      const shiftDate = s.businessDate || toLocalYMD(s.openedAt);
       return shiftDate >= startDateStr && shiftDate <= endDateStr;
     });
     let openingFloatCents = 0;
     let cashInCents = 0;
     let cashOutCents = 0;
-    let cashRefundsCents = 0;
+    let shiftCashRefunds = 0;
     let actualClosingCents = 0;
     let expectedClosingCents = 0;
+    let varianceCents = 0;
+    let closedAuditedCount = 0;
 
     rangeShifts.forEach((s) => {
-      openingFloatCents += s.openingCash;
-      cashInCents += s.cashIn;
-      cashOutCents += s.cashOut;
-      cashRefundsCents += s.cashRefunds;
-      actualClosingCents += s.closingCashEntered || 0;
-      expectedClosingCents += s.expectedClosingCash || (s.openingCash + s.cashSales + s.cashIn - s.cashRefunds - s.cashOut);
+      openingFloatCents += s.openingCash || 0;
+      cashInCents += s.cashIn || 0;
+      cashOutCents += s.cashOut || 0;
+      shiftCashRefunds += s.cashRefunds || 0;
+
+      // Only count closing cash and variance for shifts that were actually closed and counted
+      if (s.status === 'CLOSED' && s.closingCashEntered !== null && s.closingCashEntered !== undefined) {
+        actualClosingCents += s.closingCashEntered;
+        const expected = s.expectedClosingCash !== null && s.expectedClosingCash !== undefined
+          ? s.expectedClosingCash
+          : ((s.openingCash || 0) + (s.cashSales || 0) + (s.cashIn || 0) - (s.cashRefunds || 0) - (s.cashOut || 0));
+        expectedClosingCents += expected;
+        varianceCents += (s.closingCashEntered - expected);
+        closedAuditedCount += 1;
+      }
     });
 
-    const varianceCents = actualClosingCents - expectedClosingCents;
+    const activeShift = data.activeShift || rangeShifts.find((s) => s.status === 'OPEN');
+    const liveDrawerBalanceCents = activeShift
+      ? ((activeShift.openingCash || 0) + (activeShift.cashSales || 0) + (activeShift.cashIn || 0) - (activeShift.cashRefunds || 0) - (activeShift.cashOut || 0))
+      : 0;
 
     return {
       date: startDateStr === endDateStr ? startDateStr : `${startDateStr} to ${endDateStr}`,
@@ -225,10 +199,12 @@ export const reportService = {
       openingFloatCents,
       cashInCents,
       cashOutCents,
-      cashRefundsCents,
+      cashRefundsCents: shiftCashRefunds || cashRefundsCents,
       expectedClosingCents,
       actualClosingCents,
       varianceCents,
+      closedAuditedCount,
+      liveDrawerBalanceCents,
     };
   },
 
@@ -240,15 +216,21 @@ export const reportService = {
     hours.forEach((h) => map.set(h, { salesCents: 0, orders: 0 }));
 
     data.orders.forEach((ord) => {
+      if (ord.status === 'CANCELLED') return;
       if (startDateStr && endDateStr) {
-        const orderDate = ord.createdAt.split('T')[0];
+        const orderDate = toLocalYMD(ord.createdAt);
         if (orderDate < startDateStr || orderDate > endDateStr) return;
       }
       try {
         const d = new Date(ord.createdAt);
-        const h = d.getHours();
+        const hourStr = new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Colombo',
+          hour: 'numeric',
+          hourCycle: 'h23',
+        }).format(d);
+        const h = parseInt(hourStr, 10);
         let hourLabel = '08 AM';
-        if (h === 8) hourLabel = '08 AM';
+        if (h <= 8) hourLabel = '08 AM';
         else if (h === 9) hourLabel = '09 AM';
         else if (h === 10) hourLabel = '10 AM';
         else if (h === 11) hourLabel = '11 AM';
@@ -276,7 +258,9 @@ export const reportService = {
     });
   },
 
-  getHourlySales: (): { hour: string; salesCents: number; orders: number }[] => {
-    return reportService.getHourlySalesForRange();
+  getHourlySales: (targetDateStr?: string): { hour: string; salesCents: number; orders: number }[] => {
+    const todayLocal = toLocalYMD(new Date());
+    const targetDate = targetDateStr ? toLocalYMD(targetDateStr) : todayLocal;
+    return reportService.getHourlySalesForRange(targetDate, targetDate);
   },
 };

@@ -8,7 +8,9 @@ import { realtimeSocketService } from '@/services/realtimeSocketService';
 import { CashDrawerTransaction, CashDrawerTransactionType, CashierShift } from '@/types';
 import { db } from '@/services/storage/db';
 import { formatLKR, formatDateTime, rupeesToCents, formatCommaInput } from '@/utils/format';
-import { promptDialog } from '@/store/useConfirmStore';
+import { toLocalYMD } from '@/services/reportService';
+import { promptDialog, confirmDialog } from '@/store/useConfirmStore';
+import { catalogService } from '@/services/catalogService';
 import {
   Coins,
   ArrowDownRight,
@@ -29,9 +31,10 @@ import {
   Clock,
   Sparkles,
   Check,
+  LogOut,
 } from 'lucide-react';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
-import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
+import { DayDatePicker } from '@/components/ui/DayDatePicker';
 import { useAuthStore } from '@/store/useAuthStore';
 import { toast } from 'sonner';
 
@@ -41,7 +44,8 @@ const TYPE_FILTER_OPTIONS: SelectOption[] = [
   { value: 'CASH_SALE', label: 'POS Cash Sales' },
   { value: 'OPENING_CASH', label: 'Opening Float' },
   { value: 'CASH_IN', label: 'Cash In (Add)' },
-  { value: 'CASH_OUT', label: 'Cash Out (Expense)' },
+  { value: 'CASH_OUT', label: 'Expenses' },
+  { value: 'SHIFT_CLOSE', label: 'Shift Close (Cashout)' },
   { value: 'CASH_REFUND', label: 'Cash Refunds' },
   { value: 'CASH_DROP', label: 'Cash Drop to Safe' },
   { value: 'CLOSING_ADJUSTMENT', label: 'Closing Audit' },
@@ -59,15 +63,10 @@ export const AdminCashDrawerPage: React.FC = () => {
   const [transactions, setTransactions] = useState(cashDrawerService.getTransactions());
   const [activeShift, setActiveShift] = useState(shiftService.getActiveShift());
 
-  // Date Range (defaults to current year/month)
-  const now = new Date();
-  const currentMonthStr = String(now.getMonth() + 1);
-  const currentYearStr = String(now.getFullYear());
+  // Date Filter (defaults to current date YYYY-MM-DD in Sri Lanka)
+  const getTodayStr = () => toLocalYMD(new Date());
 
-  const [dateRange, setDateRange] = useState<MonthYearValue>({
-    year: currentYearStr,
-    month: currentMonthStr,
-  });
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr);
 
   // Search and Filter State
   const [typeFilter, setTypeFilter] = useState('ALL');
@@ -132,14 +131,28 @@ export const AdminCashDrawerPage: React.FC = () => {
     return transactions.filter((t) => t.status === 'PENDING_APPROVAL');
   }, [transactions]);
 
-  // Current Live Drawer Balance
+  // Dismissed notification banner state (stays dismissed until new requests arrive)
+  const [dismissedAtCount, setDismissedAtCount] = useState<number | null>(null);
+  const isReminderDismissed = dismissedAtCount !== null && pendingRequests.length <= dismissedAtCount;
+
+  useEffect(() => {
+    if (pendingRequests.length === 0 && dismissedAtCount !== null) {
+      setDismissedAtCount(null);
+    }
+  }, [pendingRequests.length, dismissedAtCount]);
+
+  const allShifts = db.getSnapshot().shifts || [];
+  const latestShift = allShifts[0] || null;
+  const displayShift = activeShift || latestShift;
+
+  // Current Live Drawer Balance & Shift KPI Totals
   const currentBalance = activeShift ? cashDrawerService.getCurrentDrawerBalance(activeShift.id) : 0;
-  const shiftCashSales = activeShift ? activeShift.cashSales : 0;
-  const shiftFloat = activeShift ? activeShift.openingCash : 0;
-  const shiftCashIn = activeShift ? (activeShift.cashIn || 0) : 0;
-  const shiftCashOut = activeShift ? activeShift.cashOut : 0;
-  const shiftRefunds = activeShift ? activeShift.cashRefunds : 0;
-  const shiftCashDrops = activeShift ? (activeShift.cashDrops || 0) : 0;
+  const shiftCashSales = displayShift ? displayShift.cashSales : 0;
+  const shiftFloat = displayShift ? displayShift.openingCash : 0;
+  const shiftCashIn = displayShift ? (displayShift.cashIn || 0) : 0;
+  const shiftCashOut = displayShift ? displayShift.cashOut : 0;
+  const shiftRefunds = displayShift ? displayShift.cashRefunds : 0;
+  const shiftCashDrops = displayShift ? (displayShift.cashDrops || 0) : 0;
 
   // Filtered Transactions for Movements Tab
   const filteredTransactions = useMemo(() => {
@@ -151,11 +164,10 @@ export const AdminCashDrawerPage: React.FC = () => {
         return false;
       }
 
-      // Month & Year Filter
-      if (dateRange.year !== 'ALL') {
-        const txDate = new Date(t.timestamp);
-        if (String(txDate.getFullYear()) !== dateRange.year) return false;
-        if (dateRange.month !== 'ALL' && String(txDate.getMonth() + 1) !== dateRange.month) return false;
+      // Date Filter (YYYY-MM-DD in Sri Lanka)
+      if (selectedDate !== 'ALL') {
+        const txDateStr = toLocalYMD(t.createdAt || t.timestamp);
+        if (txDateStr !== selectedDate) return false;
       }
 
       // Search Filter
@@ -171,7 +183,7 @@ export const AdminCashDrawerPage: React.FC = () => {
 
       return true;
     });
-  }, [transactions, typeFilter, dateRange, search]);
+  }, [transactions, typeFilter, selectedDate, search]);
 
   // Cashier Requests (All staff-submitted cash requests, drops, or non-order register requests)
   const cashierRequests = useMemo(() => {
@@ -189,11 +201,10 @@ export const AdminCashDrawerPage: React.FC = () => {
   // Filtered Cashier Requests for Requests Tab
   const filteredCashierRequests = useMemo(() => {
     return cashierRequests.filter((req) => {
-      // Month & Year Filter
-      if (dateRange.year !== 'ALL') {
-        const txDate = new Date(req.timestamp);
-        if (String(txDate.getFullYear()) !== dateRange.year) return false;
-        if (dateRange.month !== 'ALL' && String(txDate.getMonth() + 1) !== dateRange.month) return false;
+      // Date Filter (YYYY-MM-DD in Sri Lanka)
+      if (selectedDate !== 'ALL') {
+        const txDateStr = toLocalYMD(req.createdAt || req.timestamp);
+        if (txDateStr !== selectedDate) return false;
       }
 
       // Status Filter
@@ -214,7 +225,7 @@ export const AdminCashDrawerPage: React.FC = () => {
 
       return true;
     });
-  }, [cashierRequests, dateRange, requestStatusFilter, search]);
+  }, [cashierRequests, selectedDate, requestStatusFilter, search]);
 
   const reqPendingCount = useMemo(() => {
     return cashierRequests.filter((r) => r.status === 'PENDING_APPROVAL').length;
@@ -329,35 +340,78 @@ export const AdminCashDrawerPage: React.FC = () => {
       status: 'APPROVED',
     });
 
+    if (movementType === 'CASH_OUT') {
+      catalogService.addExpense({
+        title: movementReason.trim() || 'Manual drawer expense',
+        category: expenseCategory,
+        amountCents,
+        paidViaDrawer: true,
+        shiftId: activeShift.id,
+        cashierId,
+        cashierName,
+      });
+    }
+
     toast.success(
       movementType === 'CASH_IN'
         ? `Added ${formatLKR(amountCents)} to cash drawer`
         : movementType === 'CASH_DROP'
         ? `Transferred ${formatLKR(amountCents)} from cash drawer to safe deposit`
-        : `Withdrew ${formatLKR(amountCents)} from cash drawer`
+        : `Recorded expense of ${formatLKR(amountCents)} from cash drawer`
     );
 
     setIsMovementModalOpen(false);
     setAmountRupees('');
   };
 
+  // Handle Admin Manually Closing Active Shift & Clearing Drawer
+  const handleAdminCloseShift = async () => {
+    if (!activeShift) return;
+    const ok = await confirmDialog({
+      title: `Close Shift #${activeShift.shiftNumber} & Clear Drawer?`,
+      message: `Are you sure you want to close this shift for ${activeShift.cashierName} and cash out the drawer balance of ${formatLKR(currentBalance)}? The drawer will be cashed out to Rs. 0.00 and cashier will be signed out to log in fresh.`,
+      confirmText: 'Yes, Close & Cash Out',
+      cancelText: 'Cancel',
+      variant: 'warning',
+    });
+    if (!ok) return;
+
+    try {
+      await shiftService.closeShift({
+        shiftId: activeShift.id,
+        closedByUserId: session?.user?.id || 'admin',
+        closedByUserName: session?.user?.name || 'Administrator',
+        closingCashEnteredCents: currentBalance,
+        closingNotes: 'Manually closed and cashed out by Administrator',
+      });
+      toast.success(`Shift #${activeShift.shiftNumber} closed and drawer cleared to Rs. 0.00.`);
+      setActiveShift(null);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to close shift');
+    }
+  };
+
   return (
     <div className="h-full flex-1 flex flex-col min-h-0 space-y-3 w-full animate-in fade-in">
       {/* 1. TOP STATS CARDS ROW (4 Metric Cards including Cash Drops) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 shrink-0">
-        {/* Card 1: Live Drawer Cash */}
+        {/* Card 1: Live Drawer Cash / Closed Status */}
         <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E9E0D5] shadow-xs flex items-center justify-between">
           <div>
-            <div className="flex items-center gap-1.5 mb-1">
+            <div className="flex items-center gap-1.5 mb-1 flex-wrap">
               <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
-                POS-01 Live Drawer Cash
+                {activeShift ? 'POS-01 Live Drawer Cash' : 'POS-01 Drawer Status'}
               </span>
               <span
                 className={`w-2 h-2 rounded-full ${
-                  activeShift ? 'bg-status-success animate-pulse' : 'bg-text-muted/40'
+                  activeShift ? 'bg-status-success animate-pulse' : 'bg-amber-500'
                 }`}
-                title={activeShift ? 'Active Shift Open' : 'No active shift'}
+                title={activeShift ? 'Active Shift Open' : 'Register Closed / Cashed Out'}
               />
+              <span className="text-[9.5px] font-extrabold text-amber-800 bg-amber-50 border border-amber-200/70 px-1.5 py-0.5 rounded-md flex items-center gap-1">
+                <Clock className="w-2.5 h-2.5 text-amber-600" />
+                Auto-close 11:59 PM
+              </span>
             </div>
             <div className="text-xl sm:text-2xl font-black text-brand-brown-deep tabular-nums">
               {formatLKR(currentBalance)}
@@ -365,7 +419,9 @@ export const AdminCashDrawerPage: React.FC = () => {
             <div className="text-[11px] text-text-secondary mt-1 font-semibold truncate">
               {activeShift
                 ? `Shift #${activeShift.shiftNumber} (${activeShift.cashierName})`
-                : 'No active cashier shift'}
+                : latestShift
+                ? `Shift #${latestShift.shiftNumber} Closed (${latestShift.cashierName}) • Cashed Out: ${formatLKR(latestShift.closingCashEntered || latestShift.expectedClosingCash || 0)}`
+                : 'No active cashier shift • Drawer cleared'}
             </div>
           </div>
           <div className="w-10 h-10 rounded-2xl bg-cream-100 border border-[#E0D7CC] flex items-center justify-center text-brand-brown shrink-0 shadow-xs">
@@ -378,7 +434,7 @@ export const AdminCashDrawerPage: React.FC = () => {
           <div>
             <div className="flex items-center gap-1.5 mb-1">
               <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
-                Shift Cash Sales
+                {activeShift ? 'Shift Cash Sales' : 'Last Shift Cash Sales'}
               </span>
               <span className="w-2 h-2 rounded-full bg-brand-teal shrink-0" />
             </div>
@@ -388,6 +444,7 @@ export const AdminCashDrawerPage: React.FC = () => {
             <div className="text-[11px] text-text-secondary mt-1 font-semibold">
               Float: <span className="font-bold text-brand-brown-dark">{formatLKR(shiftFloat)}</span>
               {shiftCashIn > 0 && <span> • In: {formatLKR(shiftCashIn)}</span>}
+              {!activeShift && latestShift && <span className="text-text-muted"> (Shift #{latestShift.shiftNumber})</span>}
             </div>
           </div>
           <div className="w-10 h-10 rounded-2xl bg-teal-50 border border-teal-200/50 flex items-center justify-center text-brand-teal shrink-0 shadow-xs">
@@ -400,7 +457,7 @@ export const AdminCashDrawerPage: React.FC = () => {
           <div>
             <div className="flex items-center gap-1.5 mb-1">
               <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
-                Drawer Payouts & Refunds
+                {activeShift ? 'Drawer Expenses & Refunds' : 'Last Shift Expenses & Refunds'}
               </span>
               <span className="w-2 h-2 rounded-full bg-status-danger shrink-0" />
             </div>
@@ -408,7 +465,7 @@ export const AdminCashDrawerPage: React.FC = () => {
               {formatLKR(shiftCashOut + shiftRefunds)}
             </div>
             <div className="text-[11px] text-text-secondary mt-1 font-semibold">
-              Out: {formatLKR(shiftCashOut)} • Refunds: {formatLKR(shiftRefunds)}
+              Expenses: {formatLKR(shiftCashOut)} • Refunds: {formatLKR(shiftRefunds)}
             </div>
           </div>
           <div className="w-10 h-10 rounded-2xl bg-rose-50 border border-rose-200/60 flex items-center justify-center text-status-danger shrink-0 shadow-xs">
@@ -416,20 +473,32 @@ export const AdminCashDrawerPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Card 4: Safe Drops to Vault */}
+        {/* Card 4: Safe Drops to Vault / Total Cashout */}
         <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E9E0D5] shadow-xs flex items-center justify-between">
           <div>
             <div className="flex items-center gap-1.5 mb-1">
               <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">
-                Safe Drops (Vault)
+                {activeShift ? 'Safe Drops (Vault)' : 'Last Shift Cashout (Total)'}
               </span>
               <span className="w-2 h-2 rounded-full bg-amber-600 shrink-0" />
             </div>
             <div className="text-xl sm:text-2xl font-black text-amber-900 tabular-nums">
-              {formatLKR(shiftCashDrops)}
+              {formatLKR(
+                activeShift
+                  ? shiftCashDrops
+                  : (latestShift?.closingCashEntered || latestShift?.expectedClosingCash || 0)
+              )}
             </div>
             <div className="text-[11px] text-text-secondary mt-1 font-semibold">
-              Shift Safe Drops: <span className="font-bold text-amber-950">{formatLKR(shiftCashDrops)}</span>
+              {activeShift ? (
+                <>
+                  Shift Safe Drops: <span className="font-bold text-amber-950">{formatLKR(shiftCashDrops)}</span>
+                </>
+              ) : (
+                <>
+                  Drawer Cashed Out: <span className="font-bold text-amber-950">{formatLKR(latestShift?.closingCashEntered || 0)}</span>
+                </>
+              )}
             </div>
           </div>
           <div className="w-10 h-10 rounded-2xl bg-amber-50 border border-amber-200/70 flex items-center justify-center text-amber-800 shrink-0 shadow-xs">
@@ -493,6 +562,18 @@ export const AdminCashDrawerPage: React.FC = () => {
         <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
           {activeTab === 'movements' && (
             <>
+              {activeShift && (
+                <button
+                  type="button"
+                  onClick={handleAdminCloseShift}
+                  className="h-9 px-3.5 rounded-full bg-cream-100 hover:bg-rose-50 text-rose-700 border border-rose-200/80 font-extrabold text-xs transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer whitespace-nowrap shadow-2xs"
+                  title={`Close Shift #${activeShift.shiftNumber} and cash out drawer`}
+                >
+                  <LogOut className="w-3.5 h-3.5 text-rose-600" />
+                  <span>Close & Clear Drawer</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setIsMovementModalOpen(true)}
@@ -511,9 +592,9 @@ export const AdminCashDrawerPage: React.FC = () => {
                 />
               </div>
 
-              <MonthYearPicker
-                value={dateRange}
-                onChange={(newVal) => setDateRange(newVal)}
+              <DayDatePicker
+                value={selectedDate}
+                onChange={(newVal) => setSelectedDate(newVal)}
               />
             </>
           )}
@@ -529,90 +610,46 @@ export const AdminCashDrawerPage: React.FC = () => {
                 />
               </div>
 
-              <MonthYearPicker
-                value={dateRange}
-                onChange={(newVal) => setDateRange(newVal)}
+              <DayDatePicker
+                value={selectedDate}
+                onChange={(newVal) => setSelectedDate(newVal)}
               />
             </>
           )}
         </div>
       </div>
 
-      {/* PENDING STAFF CASH MOVEMENT REQUESTS (SLEEK TABLE PATTERN MATCHING STOCK PAGE) */}
-      {pendingRequests.length > 0 && activeTab !== 'requests' && (
-        <div className="bg-white rounded-2xl border border-[#E9E0D5] shadow-xs overflow-hidden flex flex-col mb-2 shrink-0 animate-in fade-in slide-in-from-top-1">
-          <div className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-50/50 border-b border-[#EAE3DA]">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              <span className="text-xs font-black text-brand-brown-deep tracking-wider uppercase flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-amber-700" />
-                <span>Pending Cash Movement Requests ({pendingRequests.length} waiting authorization)</span>
-              </span>
-            </div>
+      {/* PENDING STAFF CASH MOVEMENT REQUESTS REMINDER NOTIFICATION BANNER */}
+      {pendingRequests.length > 0 && activeTab !== 'requests' && !isReminderDismissed && (
+        <div className="bg-amber-50/70 border border-amber-200/80 rounded-2xl px-4 py-2.5 mb-2 shrink-0 shadow-xs flex items-center justify-between gap-3 animate-in fade-in slide-in-from-top-1">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+            <Clock className="w-4 h-4 text-amber-700 shrink-0" />
+            <span className="text-xs font-black text-brand-brown-deep tracking-wider uppercase truncate">
+              Pending Cash Movement Requests ({pendingRequests.length} waiting authorization)
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
             <button
               type="button"
               onClick={() => handleTabChange('requests')}
-              className="text-[11px] font-bold text-amber-800 hover:text-amber-950 hover:underline flex items-center gap-1 cursor-pointer"
+              className="text-[11px] sm:text-xs font-bold text-amber-800 hover:text-amber-950 hover:underline flex items-center gap-1 cursor-pointer transition-colors"
             >
               <span>Manage all in Requests tab</span>
               <span>→</span>
             </button>
-          </div>
-
-          <div className="overflow-x-auto max-h-56 overflow-y-auto">
-            <table className="w-full text-left text-xs border-collapse">
-              <thead className="sticky top-0 bg-[#FAF7F2]/95 backdrop-blur-xs z-10 shadow-2xs">
-                <tr className="border-b border-[#EAE3DA] text-text-muted font-black uppercase text-[10px] tracking-wider">
-                  <th className="py-2.5 px-3.5 bg-[#FAF7F2]/95">Type</th>
-                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-right">Amount</th>
-                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95">Staff / Cashier & Reason</th>
-                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Shift / Terminal</th>
-                  <th className="py-2.5 px-3 bg-[#FAF7F2]/95 text-center">Time</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#F0EAE2]">
-                {pendingRequests.map((req) => (
-                  <tr
-                    key={req.id}
-                    onClick={() => setReviewingTx(req)}
-                    className="hover:bg-[#FAF7F2]/80 transition-colors group cursor-pointer"
-                    title="Click to view details and review request"
-                  >
-                    <td className="py-2.5 px-3.5 whitespace-nowrap">
-                      <span
-                        className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border shadow-2xs ${
-                          req.type === 'CASH_OUT'
-                            ? 'bg-rose-50 text-rose-700 border-rose-200'
-                            : req.type === 'CASH_DROP'
-                            ? 'bg-amber-50 text-amber-800 border-amber-300'
-                            : 'bg-teal-50 text-brand-teal-dark border-teal-200'
-                        }`}
-                      >
-                        {req.type.replace(/_/g, ' ')}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3 text-right whitespace-nowrap font-black text-rose-700 text-sm tabular-nums">
-                      {formatLKR(Math.abs(req.amount))}
-                    </td>
-                    <td className="py-2.5 px-3">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-bold text-brand-brown-dark text-xs">{req.cashierName}:</span>
-                        <span className="text-text-muted text-[11px] truncate max-w-xs">{req.reason || 'General expense'}</span>
-                      </div>
-                    </td>
-                    <td className="py-2.5 px-3 text-center text-text-secondary text-xs">
-                      {req.terminalId || 'POS-01'}
-                    </td>
-                    <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md font-mono font-bold text-[11px] bg-cream-100/70 text-brand-brown border border-[#E0D7CC]">
-                        <Clock className="w-3 h-3 text-amber-700 shrink-0" />
-                        <span>{format(new Date(req.timestamp), 'hh:mm a')}</span>
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="w-[1px] h-3.5 bg-amber-300/80" />
+            <button
+              type="button"
+              onClick={() => setDismissedAtCount(pendingRequests.length)}
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-lg text-amber-800 hover:text-amber-950 hover:bg-amber-200/50 text-[11px] font-semibold transition-colors cursor-pointer"
+              title="Dismiss notification"
+              aria-label="Dismiss notification"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Dismiss</span>
+            </button>
           </div>
         </div>
       )}
@@ -633,7 +670,7 @@ export const AdminCashDrawerPage: React.FC = () => {
           </div>
           <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
             <span className="w-2 h-2 rounded-full bg-status-danger shrink-0" />
-            <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Outflow:</span>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-text-muted">Expenses:</span>
             <span className="font-black text-xs text-status-danger tabular-nums">{formatLKR(filteredTotalOut)}</span>
           </div>
           <div className="flex items-center gap-1.5 border-l border-[#EAE3DA] pl-3">
@@ -716,6 +753,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                     const isRefund = tx.type === 'CASH_REFUND';
                     const isDrop = tx.type === 'CASH_DROP';
                     const isOut = tx.type === 'CASH_OUT';
+                    const isShiftClose = tx.type === 'SHIFT_CLOSE';
                     const isPending = tx.status === 'PENDING_APPROVAL';
                     const isRejected = tx.status === 'REJECTED';
 
@@ -729,12 +767,14 @@ export const AdminCashDrawerPage: React.FC = () => {
                         title={isPending ? 'Click to review and authorize request' : undefined}
                       >
                         <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
-                          {formatDateTime(tx.timestamp)}
+                          {formatDateTime(tx.createdAt || tx.timestamp)}
                         </td>
                         <td className="py-3.5 px-4">
                           <span
                             className={`px-2.5 py-0.5 rounded-full font-black text-[10px] uppercase border inline-flex items-center gap-1.5 ${
-                              isSale || isOpening || isIn
+                              isShiftClose
+                                ? 'bg-purple-50 text-purple-700 border-purple-200'
+                                : isSale || isOpening || isIn
                                 ? 'bg-status-success-bg text-status-success border-status-success/30'
                                 : isRefund || isOut
                                 ? 'bg-status-danger-bg text-status-danger border-status-danger/30'
@@ -743,14 +783,16 @@ export const AdminCashDrawerPage: React.FC = () => {
                                 : 'bg-amber-50 text-amber-800 border-amber-200'
                             }`}
                           >
-                            {isDrop ? (
+                            {isShiftClose ? (
+                              <LogOut className="w-3 h-3 text-purple-700 shrink-0" />
+                            ) : isDrop ? (
                               <Building2 className="w-3 h-3 text-amber-800 shrink-0" />
                             ) : isPositive ? (
                               <ArrowDownRight className="w-3 h-3 text-status-success shrink-0" />
                             ) : (
                               <ArrowUpRight className="w-3 h-3 text-status-danger shrink-0" />
                             )}
-                            <span>{isDrop ? 'CASH DROP' : tx.type.replace(/_/g, ' ')}</span>
+                            <span>{isShiftClose ? 'SHIFT CLOSE' : isDrop ? 'CASH DROP' : isOut ? 'EXPENSES' : tx.type.replace(/_/g, ' ')}</span>
                           </span>
                         </td>
                         <td className="py-3.5 px-4 font-black text-brand-brown-dark">
@@ -787,12 +829,18 @@ export const AdminCashDrawerPage: React.FC = () => {
                             className={`font-black text-xs tabular-nums ${
                               isRejected
                                 ? 'text-text-muted line-through'
+                                : isShiftClose
+                                ? 'text-purple-700 font-extrabold'
                                 : isPositive
                                 ? 'text-status-success'
                                 : 'text-status-danger'
                             }`}
                           >
-                            {isPositive ? `+${formatLKR(tx.amount)}` : formatLKR(tx.amount)}
+                            {isShiftClose
+                              ? formatLKR(Math.abs(tx.amount))
+                              : isPositive
+                              ? `+${formatLKR(tx.amount)}`
+                              : formatLKR(tx.amount)}
                           </span>
                         </td>
                         <td className="py-3.5 px-4 text-right font-black text-brand-brown-deep tabular-nums">
@@ -861,7 +909,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                         title="Click to view details and review request"
                       >
                         <td className="py-3.5 px-4 text-text-secondary whitespace-nowrap">
-                          {formatDateTime(req.timestamp)}
+                          {formatDateTime(req.createdAt || req.timestamp)}
                         </td>
                         <td className="py-3.5 px-4">
                           <span
@@ -873,7 +921,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                                 : 'bg-status-success-bg text-status-success border-status-success/30'
                             }`}
                           >
-                            {req.type.replace(/_/g, ' ')}
+                            {req.type === 'CASH_OUT' ? 'EXPENSES' : req.type.replace(/_/g, ' ')}
                           </span>
                         </td>
                         <td className="py-3.5 px-4 font-bold text-brand-brown-dark">
@@ -1011,7 +1059,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                     <div className="grid grid-cols-3 gap-2">
                       {[
                         { id: 'CASH_IN', label: '+ Cash In (Add)' },
-                        { id: 'CASH_OUT', label: '- Cash Out (Payout)' },
+                        { id: 'CASH_OUT', label: '- Expenses (Payout)' },
                         { id: 'CASH_DROP', label: 'Safe Cash Drop' },
                       ].map((t) => (
                         <button
@@ -1136,7 +1184,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                       Movement Type
                     </label>
                     <div className="w-full pb-2 pt-1 bg-transparent border-0 border-b border-[#E2D8CC] text-sm font-bold text-brand-brown-dark flex items-center justify-between">
-                      <span className="font-extrabold">{reviewingTx.type.replace(/_/g, ' ')}</span>
+                      <span className="font-extrabold">{reviewingTx.type === 'CASH_OUT' ? 'EXPENSES' : reviewingTx.type.replace(/_/g, ' ')}</span>
                       <span className="text-xs font-bold text-brand-teal">
                         Shift: #{reviewingTx.shiftId ? reviewingTx.shiftId.slice(-4) : '104'} ({reviewingTx.terminalId || 'POS-01'})
                       </span>
@@ -1182,7 +1230,7 @@ export const AdminCashDrawerPage: React.FC = () => {
                         Ref: <strong className="font-mono text-brand-brown-dark">{reviewingTx.id}</strong>
                       </span>
                       <span>
-                        Submitted: {formatDateTime(reviewingTx.timestamp)}
+                        Submitted: {formatDateTime(reviewingTx.createdAt || reviewingTx.timestamp)}
                       </span>
                     </div>
                   </div>

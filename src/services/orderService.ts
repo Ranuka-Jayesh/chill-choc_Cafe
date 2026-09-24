@@ -4,9 +4,8 @@ import { inventoryService } from './inventoryService';
 import { printerService } from './printerService';
 import { realtimeSocketService } from './realtimeSocketService';
 import { customerService } from './customerService';
-import { directPrintService } from './directPrintService';
 import { Order, OrderItem, PaymentMethod, PaymentSplit, OrderType, HeldOrder } from '@/types';
-import { formatOrderNumber } from '@/utils/format';
+import { formatOrderNumber, getSriLankaNowISO } from '@/utils/format';
 
 export interface CreateOrderInput {
   shiftId: string;
@@ -89,7 +88,7 @@ export const orderService = {
       serviceChargeCents: input.serviceChargeCents,
       taxCents: input.taxCents,
       totalCents: input.totalCents,
-      heldAt: new Date().toISOString(),
+      heldAt: getSriLankaNowISO(),
       heldByCashierId: input.cashierId,
       heldByCashierName: input.cashierName,
     };
@@ -106,7 +105,7 @@ export const orderService = {
         entityId: heldOrder.id,
         details: `Held order #${heldOrder.holdNumber} (${heldOrder.items.length} items, Rs. ${(heldOrder.totalCents / 100).toFixed(2)}) - ${holdLabel}`,
         terminalId: input.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       });
     });
 
@@ -129,7 +128,7 @@ export const orderService = {
           entityId: heldOrderId,
           details: `Voided held order #${held.holdNumber} (${held.holdLabel})`,
           terminalId,
-          timestamp: new Date().toISOString(),
+          timestamp: getSriLankaNowISO(),
         });
       }
     });
@@ -143,7 +142,7 @@ export const orderService = {
     const currentNum = db.getSnapshot().nextOrderNumber || 1045;
     const orderNumber = formatOrderNumber(currentNum);
     const orderId = `ord_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-    const now = new Date().toISOString();
+    const now = getSriLankaNowISO();
     const settings = db.getSnapshot().settings;
     let earnedPoints = 0;
     const redeemedPoints = input.loyaltyPointsRedeemed || 0;
@@ -317,20 +316,6 @@ export const orderService = {
     // 5. Automatically generate Customer Receipt
     await printerService.printCustomerReceipt(order);
 
-    // 5b. Direct Silent Thermal Printing for XPrinter (via Windows Local Print Agent)
-    if (directPrintService.isEnabled()) {
-      if (settings.autoPrintReceipt ?? true) {
-        directPrintService.printCustomerReceipt(order).catch((err) => {
-          console.warn('[DirectPrint] Automatic receipt printing warning:', err);
-        });
-      }
-      if (settings.autoPrintKOT ?? true) {
-        directPrintService.printKitchenTicket(order).catch((err) => {
-          console.warn('[DirectPrint] Automatic KOT printing warning:', err);
-        });
-      }
-    }
-
     // 6. Log Audit
     db.update('auditLogs', (logs) => [
       {
@@ -378,7 +363,7 @@ export const orderService = {
       refundRequest: {
         requestedByUserId: params.userId,
         requestedByUserName: params.userName,
-        requestedAt: new Date().toISOString(),
+        requestedAt: getSriLankaNowISO(),
         reason: params.reason,
         amountCents: refundAmount,
       },
@@ -399,7 +384,7 @@ export const orderService = {
         entityId: order.id,
         details: `Cashier ${params.userName} submitted refund request for ${order.orderNumber} (Rs. ${(refundAmount / 100).toFixed(2)}). Reason: ${params.reason}`,
         terminalId: order.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);
@@ -438,7 +423,7 @@ export const orderService = {
       refundApproval: {
         approvedByUserId: params.adminId,
         approvedByUserName: params.adminName,
-        approvedAt: new Date().toISOString(),
+        approvedAt: getSriLankaNowISO(),
         notes: params.notes,
       },
     };
@@ -476,7 +461,7 @@ export const orderService = {
         entityId: order.id,
         details: `Admin ${params.adminName} approved refund for ${order.orderNumber} (Rs. ${(refundAmount / 100).toFixed(2)}).`,
         terminalId: order.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);
@@ -508,7 +493,7 @@ export const orderService = {
       refundRejection: {
         rejectedByUserId: params.adminId,
         rejectedByUserName: params.adminName,
-        rejectedAt: new Date().toISOString(),
+        rejectedAt: getSriLankaNowISO(),
         rejectionReason: params.rejectionReason,
       },
     };
@@ -528,7 +513,7 @@ export const orderService = {
         entityId: order.id,
         details: `Admin ${params.adminName} rejected refund request for ${order.orderNumber}. Reason: ${params.rejectionReason || 'No reason provided'}`,
         terminalId: order.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);
@@ -563,7 +548,7 @@ export const orderService = {
       refundApproval: {
         approvedByUserId: params.userId,
         approvedByUserName: params.userName,
-        approvedAt: new Date().toISOString(),
+        approvedAt: getSriLankaNowISO(),
       },
     };
 
@@ -600,7 +585,7 @@ export const orderService = {
         entityId: order.id,
         details: `Refunded Rs. ${(refundAmount / 100).toFixed(2)} on ${order.orderNumber}. Reason: ${params.reason}`,
         terminalId: order.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);

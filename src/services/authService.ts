@@ -1,6 +1,9 @@
 import { db } from './storage/db';
 import { supabase } from './supabaseClient';
 import { User, AuthSession, Role } from '@/types';
+import { toLocalYMD } from './reportService';
+import { getSriLankaNowISO } from '@/utils/format';
+import { getSriLankaDateTimeParts } from './autoShiftCloseService';
 
 const SESSION_KEY = 'chill_choc_auth_session';
 
@@ -42,10 +45,13 @@ export const authService = {
       users.map((u) => (u.id === user.id ? updatedUser : u))
     );
 
+    const now = new Date();
     const session: AuthSession = {
       user: updatedUser,
       token: `token_${user.id}_${Date.now()}`,
       terminalId,
+      loginDate: toLocalYMD(now),
+      loggedInAt: getSriLankaNowISO(now),
     };
 
     if (typeof window !== 'undefined') {
@@ -99,7 +105,24 @@ export const authService = {
     try {
       const raw = localStorage.getItem(SESSION_KEY);
       if (!raw) return null;
-      return JSON.parse(raw);
+      const session: AuthSession = JSON.parse(raw);
+
+      // If signed in as a CASHIER, check if session is from a previous day or past 11:59 PM cutoff
+      if (session?.user?.role === 'CASHIER') {
+        const { ymd: todayYMD, hours, minutes } = getSriLankaDateTimeParts();
+        const loginDate = session.loginDate || toLocalYMD(session.loggedInAt || session.user.lastLoginAt);
+
+        const isPastCutoff =
+          (loginDate && loginDate < todayYMD) ||
+          (loginDate === todayYMD && (hours > 23 || (hours === 23 && minutes >= 59)));
+
+        if (isPastCutoff) {
+          localStorage.removeItem(SESSION_KEY);
+          return null;
+        }
+      }
+
+      return session;
     } catch {
       return null;
     }

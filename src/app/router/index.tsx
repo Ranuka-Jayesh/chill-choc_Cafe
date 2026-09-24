@@ -29,7 +29,6 @@ import { AdminReportsPage } from '@/features/admin/pages/AdminReportsPage';
 import { AdminUsersPage } from '@/features/admin/pages/AdminUsersPage';
 import { AdminAccountingPage } from '@/features/admin/pages/AdminAccountingPage';
 import { AdminSettingsPage } from '@/features/admin/pages/AdminSettingsPage';
-import { AdminReceiptDesignerPage } from '@/features/admin/pages/AdminReceiptDesignerPage';
 
 export const router = createBrowserRouter([
   // Root Redirect
@@ -145,11 +144,11 @@ export const router = createBrowserRouter([
       },
       {
         path: 'receipt-customizer',
-        element: <AdminReceiptDesignerPage />,
+        element: <Navigate to="/admin/settings" replace />,
       },
       {
         path: 'receipt-designer',
-        element: <AdminReceiptDesignerPage />,
+        element: <Navigate to="/admin/settings" replace />,
       },
     ],
   },

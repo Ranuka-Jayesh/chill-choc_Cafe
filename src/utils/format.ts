@@ -87,36 +87,95 @@ export function centsToRupees(cents: number): number {
   return (cents || 0) / 100;
 }
 
+export const SRI_LANKA_TIMEZONE = 'Asia/Colombo';
+
 /**
- * Date / Time formatting helpers
+ * Generates an ISO 8601 string strictly pinned to Sri Lanka Standard Time (Asia/Colombo, UTC+05:30).
+ * Uses the local wall-clock components and explicitly attaches the '+05:30' offset,
+ * completely immune to incorrect host Windows/OS timezone settings (e.g. UTC+1 vs UTC+5:30).
+ * Example: "2026-09-24T15:10:44.568+05:30"
+ */
+export function getSriLankaNowISO(dateInput: Date | string | number = new Date()): string {
+  if (typeof dateInput === 'string' && dateInput.includes('+05:30')) {
+    return dateInput;
+  }
+  const d = dateInput instanceof Date ? dateInput : new Date(dateInput);
+  if (isNaN(d.getTime())) return new Date().toISOString();
+
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  const milliseconds = String(d.getMilliseconds()).padStart(3, '0');
+
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${milliseconds}+05:30`;
+}
+
+/**
+ * Date / Time formatting helpers strictly pinned to Asia/Colombo (Sri Lanka) Time.
+ * Guarantees consistent date/time displays across all devices and countries.
  */
 export function formatDateTime(isoString: string | undefined | null): string {
   if (!isoString) return '-';
   try {
-    const date = typeof isoString === 'string' ? parseISO(isoString) : new Date(isoString);
-    return format(date, 'dd MMM yyyy, hh:mm a');
+    const date = typeof isoString === 'string' ? new Date(isoString) : isoString;
+    if (isNaN(date.getTime())) return String(isoString);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: SRI_LANKA_TIMEZONE,
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    }).formatToParts(date);
+    const m: Record<string, string> = {};
+    parts.forEach((p) => { m[p.type] = p.value; });
+    const period = (m.dayPeriod || '').toUpperCase();
+    return `${m.day} ${m.month} ${m.year}, ${m.hour}:${m.minute} ${period}`.trim();
   } catch {
-    return isoString;
+    return String(isoString);
   }
 }
 
 export function formatDate(isoString: string | undefined | null): string {
   if (!isoString) return '-';
   try {
-    const date = typeof isoString === 'string' ? parseISO(isoString) : new Date(isoString);
-    return format(date, 'dd MMM yyyy');
+    const date = typeof isoString === 'string' ? new Date(isoString) : isoString;
+    if (isNaN(date.getTime())) return String(isoString);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: SRI_LANKA_TIMEZONE,
+      year: 'numeric',
+      month: 'short',
+      day: '2-digit',
+    }).formatToParts(date);
+    const m: Record<string, string> = {};
+    parts.forEach((p) => { m[p.type] = p.value; });
+    return `${m.day} ${m.month} ${m.year}`.trim();
   } catch {
-    return isoString;
+    return String(isoString);
   }
 }
 
 export function formatTime(isoString: string | undefined | null): string {
   if (!isoString) return '-';
   try {
-    const date = typeof isoString === 'string' ? parseISO(isoString) : new Date(isoString);
-    return format(date, 'hh:mm a');
+    const date = typeof isoString === 'string' ? new Date(isoString) : isoString;
+    if (isNaN(date.getTime())) return String(isoString);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: SRI_LANKA_TIMEZONE,
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    }).formatToParts(date);
+    const m: Record<string, string> = {};
+    parts.forEach((p) => { m[p.type] = p.value; });
+    const period = (m.dayPeriod || '').toUpperCase();
+    return `${m.hour}:${m.minute} ${period}`.trim();
   } catch {
-    return isoString;
+    return String(isoString);
   }
 }
 

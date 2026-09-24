@@ -15,6 +15,8 @@ export interface AuthSession {
   user: User;
   token: string;
   terminalId: string;
+  loginDate?: string; // Sri Lanka YYYY-MM-DD
+  loggedInAt?: string; // Sri Lanka ISO timestamp
 }
 
 export interface Terminal {
@@ -60,7 +62,8 @@ export type CashDrawerTransactionType =
   | 'CASH_IN'
   | 'CASH_OUT'
   | 'CASH_DROP'
-  | 'CLOSING_ADJUSTMENT';
+  | 'CLOSING_ADJUSTMENT'
+  | 'SHIFT_CLOSE';
 
 export interface CashDrawerTransaction {
   id: string;
@@ -81,6 +84,7 @@ export interface CashDrawerTransaction {
   approvedByUserName?: string;
   approvedAt?: string;
   rejectedReason?: string;
+  createdAt?: string;
 }
 
 export interface PreparationStation {
@@ -835,6 +839,8 @@ export interface SystemSettings {
   allowCashierManualCashOut: boolean;
   openDrawerAfterCashSale: boolean;
   defaultTerminalId: string;
+  autoCloseNightlyShifts?: boolean; // Every night at 23:59 automatically close open shifts and cashout drawer
+  autoCloseNightlyTime?: string; // e.g. "23:59"
   // Direct Thermal Printing (Windows Local Agent / XPrinter)
   directPrintEnabled?: boolean;
   directPrintAgentUrl?: string; // default "http://127.0.0.1:23456"

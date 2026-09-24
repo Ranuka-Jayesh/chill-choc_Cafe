@@ -2,22 +2,49 @@ import { db } from './storage/db';
 import { cashDrawerService } from './cashDrawerService';
 import { realtimeSocketService } from './realtimeSocketService';
 import { CashierShift } from '@/types';
+import { formatLKR, getSriLankaNowISO } from '@/utils/format';
+
+import { toLocalYMD } from './reportService';
+import { autoShiftCloseService } from './autoShiftCloseService';
+
+function getLocalBusinessDate(date: Date = new Date()): string {
+  return toLocalYMD(date);
+}
 
 export const shiftService = {
   getActiveShift: (cashierId?: string, terminalId?: string): CashierShift | null => {
     const data = db.getSnapshot();
-    // 1. Return active shift if currently OPEN
+
+    // 1. Check if data.activeShift is OPEN and matches criteria
     if (data.activeShift && data.activeShift.status === 'OPEN') {
-      if (!cashierId || data.activeShift.cashierId === cashierId) {
+      if (autoShiftCloseService.shouldShiftAutoClose(data.activeShift)) {
+        setTimeout(() => autoShiftCloseService.checkAndAutoClose(), 0);
+        return null;
+      }
+      const matchesCashier = !cashierId || data.activeShift.cashierId === cashierId;
+      const matchesTerminal = !terminalId || data.activeShift.terminalId === terminalId;
+      if (matchesCashier && matchesTerminal) {
         return data.activeShift;
       }
-      return data.activeShift;
     }
-    // 2. Return any open shift in database
-    const openInList = data.shifts.find(
-      (s) => s.status === 'OPEN' && (!cashierId || s.cashierId === cashierId)
-    ) || data.shifts.find((s) => s.status === 'OPEN');
-    return openInList || null;
+
+    // 2. Look in shifts list for a currently OPEN shift strictly matching this cashier (and terminal)
+    const matchingOpen = data.shifts.find(
+      (s) =>
+        s.status === 'OPEN' &&
+        (!cashierId || s.cashierId === cashierId) &&
+        (!terminalId || s.terminalId === terminalId)
+    );
+
+    if (matchingOpen) {
+      if (autoShiftCloseService.shouldShiftAutoClose(matchingOpen)) {
+        setTimeout(() => autoShiftCloseService.checkAndAutoClose(), 0);
+        return null;
+      }
+      return matchingOpen;
+    }
+
+    return null;
   },
 
   getOrCreateActiveShift: (params: {
@@ -33,7 +60,7 @@ export const shiftService = {
     const now = new Date();
     const shiftCount = db.getSnapshot().shifts.length + 1;
     const shiftId = `sh_${Date.now()}`;
-    const businessDate = now.toISOString().split('T')[0];
+    const businessDate = getLocalBusinessDate(now);
     const openingCash = params.openingCashCents || 0;
 
     const newShift: CashierShift = {
@@ -44,7 +71,7 @@ export const shiftService = {
       terminalId: params.terminalId || 'term_01',
       terminalName: params.terminalName || 'Main Counter POS-01',
       businessDate,
-      openedAt: now.toISOString(),
+      openedAt: getSriLankaNowISO(now),
       openingCash,
       cashSales: 0,
       cardSales: 0,
@@ -93,7 +120,7 @@ export const shiftService = {
     const now = new Date();
     const shiftCount = db.getSnapshot().shifts.length + 1;
     const shiftId = `sh_${Date.now()}`;
-    const businessDate = now.toISOString().split('T')[0];
+    const businessDate = getLocalBusinessDate(now);
 
     const newShift: CashierShift = {
       id: shiftId,
@@ -103,7 +130,7 @@ export const shiftService = {
       terminalId: params.terminalId,
       terminalName: params.terminalName,
       businessDate,
-      openedAt: now.toISOString(),
+      openedAt: getSriLankaNowISO(now),
       openingCash: params.openingCashCents,
       cashSales: 0,
       cardSales: 0,
@@ -115,8 +142,24 @@ export const shiftService = {
       status: 'OPEN',
     };
 
-    // Save shift & set as active
-    db.update('shifts', (shifts) => [newShift, ...shifts]);
+    // Close any previous lingering OPEN shift for this cashier or terminal first to keep database clean
+    db.update('shifts', (shifts) => [
+      newShift,
+      ...shifts.map((s) => {
+        if (
+          s.status === 'OPEN' &&
+          (s.cashierId === params.cashierId || s.terminalId === params.terminalId)
+        ) {
+          return {
+            ...s,
+            status: 'CLOSED' as const,
+            closedAt: getSriLankaNowISO(now),
+            closingNotes: 'Auto-closed on opening new shift',
+          };
+        }
+        return s;
+      }),
+    ]);
     db.update('activeShift', () => newShift);
 
     // Record OPENING_CASH in cash drawer ledger
@@ -143,7 +186,7 @@ export const shiftService = {
         entityId: newShift.id,
         details: `Shift #${newShift.shiftNumber} opened with Rs. ${(params.openingCashCents / 100).toFixed(2)} float`,
         terminalId: params.terminalId,
-        timestamp: now.toISOString(),
+        timestamp: getSriLankaNowISO(now),
       },
       ...logs,
     ]);
@@ -194,7 +237,7 @@ export const shiftService = {
 
     const closedShift: CashierShift = {
       ...shift,
-      closedAt: new Date().toISOString(),
+      closedAt: getSriLankaNowISO(),
       closingCashEntered: closingCashEnteredCents,
       expectedClosingCash: expectedCash,
       variance,
@@ -203,9 +246,24 @@ export const shiftService = {
       status: 'CLOSED',
     };
 
-    // Update shift in database & clear activeShift
+    // Update shift in database, auto-close any other lingering OPEN shifts for this user/terminal, and clear activeShift
+    const targetShiftId = shift.id;
     db.update('shifts', (shifts) =>
-      shifts.map((s) => (s.id === shift!.id ? closedShift : s))
+      shifts.map((s) => {
+        if (s.id === targetShiftId) return closedShift;
+        if (
+          s.status === 'OPEN' &&
+          (s.cashierId === params.closedByUserId || (shift?.terminalId && s.terminalId === shift.terminalId))
+        ) {
+          return {
+            ...s,
+            status: 'CLOSED' as const,
+            closedAt: closedShift.closedAt,
+            closingNotes: 'Auto-closed with session end',
+          };
+        }
+        return s;
+      })
     );
     db.update('activeShift', () => null);
 
@@ -222,6 +280,21 @@ export const shiftService = {
       });
     }
 
+    // Record the Shift Close Cashout movement in cash drawer ledger
+    const cashoutCents = closingCashEnteredCents;
+    if (cashoutCents > 0) {
+      cashDrawerService.addTransaction({
+        shiftId: shift.id,
+        terminalId: shift.terminalId || 'POS-01',
+        cashierId: params.closedByUserId,
+        cashierName: params.closedByUserName,
+        type: 'SHIFT_CLOSE',
+        amount: -cashoutCents,
+        reason: `Shift #${closedShift.shiftNumber} Cashout & Register Close (Counted: ${formatLKR(cashoutCents)})${params.closingNotes ? ` • ${params.closingNotes}` : ''}${variance !== 0 ? ` • ${varianceStatus} by ${formatLKR(Math.abs(variance))}` : ' • Balanced'}`,
+        status: 'APPROVED',
+      });
+    }
+
     // Log audit
     db.update('auditLogs', (logs) => [
       {
@@ -233,7 +306,7 @@ export const shiftService = {
         entityId: closedShift.id,
         details: `Shift #${closedShift.shiftNumber} closed. Expected: Rs. ${(expectedCash / 100).toFixed(2)}, Actual: Rs. ${(closingCashEnteredCents / 100).toFixed(2)}, Variance: Rs. ${(variance / 100).toFixed(2)} (${varianceStatus})`,
         terminalId: closedShift.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);

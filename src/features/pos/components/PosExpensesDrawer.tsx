@@ -290,19 +290,9 @@ export const PosExpensesDrawer: React.FC<PosExpensesDrawerProps> = ({
               <Receipt className="w-5 h-5 text-brand-orange" />
               <h3 className="font-extrabold text-sm text-brand-brown-dark">Operating Expenses</h3>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleOpenNew}
-                className="flex items-center gap-1 px-3 py-1.5 bg-brand-teal hover:bg-brand-teal-dark text-white font-extrabold text-xs rounded-xl shadow-teal transition-all active:scale-95 cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
-                <span>Add</span>
-              </button>
-              <button onClick={onClose} className="p-1.5 rounded-lg text-text-secondary hover:bg-cream-100 cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+            <button onClick={onClose} className="p-1.5 rounded-lg text-text-secondary hover:bg-cream-100 cursor-pointer">
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
           {/* Search */}

@@ -134,7 +134,7 @@ export const AdminReceiptDesignerPage: React.FC = () => {
 
   const defaultReceiptCustomization: ReceiptCustomizationSettings = useMemo(() => ({
     showLogo: true,
-    logoUrl: '/logobg.webp',
+    logoUrl: '/printlogo.jpg',
     logoWidthPx: 95,
     logoAlignment: 'center',
     logoOffsetYPx: 0,

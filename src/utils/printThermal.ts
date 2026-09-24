@@ -107,6 +107,9 @@ export function printThermalElement(elementOrId: HTMLElement | string): void {
           img {
             max-width: 100% !important;
             height: auto !important;
+            display: block !important;
+            margin-left: auto !important;
+            margin-right: auto !important;
           }
           .thermal-dev-footer, .thermal-dev-footer * {
             color: #000000 !important;
@@ -116,7 +119,7 @@ export function printThermalElement(elementOrId: HTMLElement | string): void {
         </style>
       </head>
       <body class="thermal-isolated-frame" style="background:#ffffff !important; color:#000000 !important; margin:0 !important; padding:1mm 2mm !important; width:80mm !important;">
-        <div style="width: 100%; max-width: 78mm; margin: 0 auto; background: #ffffff !important; color: #000000 !important; visibility: visible !important;">
+        <div style="width: 100%; max-width: 76mm; margin: 0 auto; background: #ffffff !important; color: #000000 !important; visibility: visible !important;">
           ${targetElem.innerHTML}
         </div>
       </body>
@@ -124,8 +127,7 @@ export function printThermalElement(elementOrId: HTMLElement | string): void {
   `);
   doc.close();
 
-  // Give brief moment for fonts and images to settle in iframe
-  setTimeout(() => {
+  const triggerPrint = () => {
     try {
       iframe.contentWindow?.focus();
       iframe.contentWindow?.print();
@@ -133,14 +135,44 @@ export function printThermalElement(elementOrId: HTMLElement | string): void {
       console.warn('Iframe print error, falling back to window.print()', err);
       window.print();
     } finally {
-      // Clean up after print dialog finishes
       setTimeout(() => {
         try {
           if (iframe.parentNode) {
             iframe.parentNode.removeChild(iframe);
           }
         } catch {}
-      }, 4000);
+      }, 5000);
     }
-  }, 350);
+  };
+
+  const images = Array.from(doc.images);
+  if (images.length === 0) {
+    setTimeout(triggerPrint, 200);
+  } else {
+    let loadedCount = 0;
+    let fired = false;
+    const onDone = () => {
+      if (fired) return;
+      loadedCount++;
+      if (loadedCount >= images.length) {
+        fired = true;
+        setTimeout(triggerPrint, 150);
+      }
+    };
+    images.forEach((img) => {
+      if (img.complete) {
+        onDone();
+      } else {
+        img.onload = onDone;
+        img.onerror = onDone;
+      }
+    });
+    // Safety fallback timer if an image hangs
+    setTimeout(() => {
+      if (!fired) {
+        fired = true;
+        triggerPrint();
+      }
+    }, 800);
+  }
 }

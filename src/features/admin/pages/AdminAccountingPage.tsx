@@ -26,6 +26,7 @@ import {
   PurchasePaymentMethod,
 } from '@/types';
 import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
+import { DayDatePicker } from '@/components/ui/DayDatePicker';
 import { CustomSelect, SelectOption } from '@/components/ui/CustomSelect';
 import { CustomDatePicker } from '@/components/ui/CustomDatePicker';
 import { EmployeeAttendanceCalendarModal } from '@/features/admin/components/EmployeeAttendanceCalendarModal';
@@ -125,6 +126,13 @@ export const AdminAccountingPage: React.FC = () => {
     year: String(new Date().getFullYear()),
     month: String(new Date().getMonth() + 1),
   });
+
+  // Operating Expenses Date Filter (defaults to current date YYYY-MM-DD)
+  const getTodayStr = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const [expenseSelectedDate, setExpenseSelectedDate] = useState<string>(getTodayStr);
 
   const [employees, setEmployees] = useState<Employee[]>(accountingService.getEmployees());
   const [employeePayments, setEmployeePayments] = useState<EmployeePayment[]>(
@@ -566,7 +574,12 @@ export const AdminAccountingPage: React.FC = () => {
   const filteredExpenses = useMemo(() => {
     const q = search.toLowerCase().trim();
     return expenses.filter((e) => {
-      if (!isMatchingPeriod(e.createdAt)) return false;
+      // Date Filter (YYYY-MM-DD)
+      if (expenseSelectedDate !== 'ALL') {
+        const d = new Date(e.createdAt);
+        const dStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (dStr !== expenseSelectedDate) return false;
+      }
       if (expenseCategoryFilter !== 'ALL' && e.category !== expenseCategoryFilter) return false;
       if (!q) return true;
       return (
@@ -575,7 +588,7 @@ export const AdminAccountingPage: React.FC = () => {
         (e.notes && e.notes.toLowerCase().includes(q))
       );
     });
-  }, [expenses, dateRange, expenseCategoryFilter, search]);
+  }, [expenses, expenseSelectedDate, expenseCategoryFilter, search]);
 
   const expenseStats = useMemo(() => {
     const total = filteredExpenses.reduce((sum, e) => sum + (e.amountCents || 0), 0);
@@ -1118,7 +1131,11 @@ export const AdminAccountingPage: React.FC = () => {
             </div>
           )}
 
-          <MonthYearPicker value={dateRange} onChange={(newVal) => setDateRange(newVal)} />
+          {activeTab === 'expenses' ? (
+            <DayDatePicker value={expenseSelectedDate} onChange={(newVal) => setExpenseSelectedDate(newVal)} />
+          ) : (
+            <MonthYearPicker value={dateRange} onChange={(newVal) => setDateRange(newVal)} />
+          )}
         </div>
       </div>
 

@@ -2,9 +2,109 @@ import { db } from './storage/db';
 import { realtimeSocketService } from './realtimeSocketService';
 import { catalogService } from './catalogService';
 import { CashDrawerTransaction, CashDrawerTransactionType } from '@/types';
+import { formatLKR, getSriLankaNowISO } from '@/utils/format';
 
 export const cashDrawerService = {
+  ensureClosedShiftsRecorded: (): void => {
+    const shifts = db.getSnapshot().shifts || [];
+    const txs = db.getSnapshot().drawerTransactions || [];
+    let modified = false;
+    const updatedTxs = [...txs];
+
+    for (const s of shifts) {
+      if (s.status === 'CLOSED' && (s.closingCashEntered || s.expectedClosingCash)) {
+        const hasExplicitClose = updatedTxs.some(
+          (t) => t.shiftId === s.id && t.type === 'SHIFT_CLOSE'
+        );
+        if (!hasExplicitClose) {
+          const cashoutCents = s.closingCashEntered || s.expectedClosingCash || 0;
+          if (cashoutCents > 0) {
+            const closeTx: CashDrawerTransaction = {
+              id: `ctx_close_${s.id}`,
+              shiftId: s.id,
+              terminalId: s.terminalId || 'POS-01',
+              cashierId: s.cashierId,
+              cashierName: s.cashierName,
+              type: 'SHIFT_CLOSE',
+              amount: -cashoutCents,
+              balanceAfter: 0,
+              reason: `Shift #${s.shiftNumber} Cashout & Register Close (Counted: ${formatLKR(cashoutCents)})${s.closingNotes ? ` • ${s.closingNotes}` : ''}${s.variance ? ` • ${s.varianceStatus || 'Variance'}: ${formatLKR(Math.abs(s.variance))}` : ' • Balanced'}`,
+              timestamp: s.closedAt || getSriLankaNowISO(),
+              status: 'APPROVED',
+            };
+            updatedTxs.push(closeTx);
+            modified = true;
+          }
+        }
+      }
+    }
+
+    if (modified) {
+      updatedTxs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+      db.update('drawerTransactions', () => updatedTxs);
+    }
+  },
+
+  repairLedgerBalances: (): void => {
+    const txs = db.getSnapshot().drawerTransactions || [];
+    const shifts = db.getSnapshot().shifts || [];
+    if (!txs.length) return;
+
+    let modified = false;
+    const txsByShift: Record<string, CashDrawerTransaction[]> = {};
+    for (const t of txs) {
+      if (!txsByShift[t.shiftId]) txsByShift[t.shiftId] = [];
+      txsByShift[t.shiftId].push(t);
+    }
+
+    const updatedTxs: CashDrawerTransaction[] = [];
+
+    for (const [shiftId, shiftTxs] of Object.entries(txsByShift)) {
+      const shift = shifts.find((s) => s.id === shiftId);
+      // Sort oldest first
+      const sorted = [...shiftTxs].sort(
+        (a, b) => new Date(a.timestamp || 0).getTime() - new Date(b.timestamp || 0).getTime()
+      );
+
+      let runningBalance = shift ? (shift.openingCash || 0) : 0;
+      for (const t of sorted) {
+        if (t.status === 'REJECTED') {
+          updatedTxs.push(t);
+          continue;
+        }
+
+        let correctBalanceAfter = t.balanceAfter;
+        if (t.type === 'OPENING_CASH') {
+          runningBalance = t.amount;
+          correctBalanceAfter = runningBalance;
+        } else if (t.type === 'SHIFT_CLOSE') {
+          runningBalance = 0;
+          correctBalanceAfter = 0;
+        } else if (t.status === 'PENDING_APPROVAL') {
+          correctBalanceAfter = runningBalance;
+        } else {
+          runningBalance += t.amount;
+          correctBalanceAfter = runningBalance;
+        }
+
+        if (t.balanceAfter !== correctBalanceAfter) {
+          modified = true;
+          updatedTxs.push({ ...t, balanceAfter: correctBalanceAfter });
+        } else {
+          updatedTxs.push(t);
+        }
+      }
+    }
+
+    if (modified) {
+      updatedTxs.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+      db.update('drawerTransactions', () => updatedTxs);
+    }
+  },
+
   getTransactions: (shiftId?: string): CashDrawerTransaction[] => {
+    cashDrawerService.ensureClosedShiftsRecorded();
+    cashDrawerService.repairLedgerBalances();
     const txs = db.getSnapshot().drawerTransactions;
     if (!shiftId) return txs;
     return txs.filter((t) => t.shiftId === shiftId);
@@ -18,16 +118,24 @@ export const cashDrawerService = {
   },
 
   getCurrentDrawerBalance: (shiftId?: string): number => {
-    const txs = cashDrawerService.getTransactions(shiftId);
-    const approvedTxs = txs.filter((t) => t.status !== 'PENDING_APPROVAL' && t.status !== 'REJECTED');
-    if (approvedTxs.length === 0) {
-      if (shiftId) {
-        const shift = db.getSnapshot().shifts.find((s) => s.id === shiftId);
-        return shift?.openingCash || 0;
-      }
-      return 0;
+    if (!shiftId) return 0;
+    const shift = db.getSnapshot().shifts.find((s) => s.id === shiftId);
+    if (shift) {
+      if (shift.status === 'CLOSED') return 0;
+      return (
+        (shift.openingCash || 0) +
+        (shift.cashSales || 0) +
+        (shift.cashIn || 0) -
+        (shift.cashRefunds || 0) -
+        (shift.cashOut || 0) -
+        (shift.cashDrops || 0)
+      );
     }
-    return approvedTxs[0].balanceAfter; // latest approved transaction balance
+    const txs = cashDrawerService.getTransactions(shiftId);
+    const approvedTxs = txs
+      .filter((t) => t.status !== 'PENDING_APPROVAL' && t.status !== 'REJECTED')
+      .sort((a, b) => new Date(b.timestamp || (b as any).createdAt || 0).getTime() - new Date(a.timestamp || (a as any).createdAt || 0).getTime());
+    return approvedTxs[0]?.balanceAfter || 0;
   },
 
   addTransaction: (params: {
@@ -44,12 +152,26 @@ export const cashDrawerService = {
     status?: 'APPROVED' | 'PENDING_APPROVAL' | 'REJECTED';
   }): CashDrawerTransaction => {
     const allTxs = db.getSnapshot().drawerTransactions;
-    const shiftTxs = allTxs.filter((t) => t.shiftId === params.shiftId && t.status !== 'PENDING_APPROVAL' && t.status !== 'REJECTED');
+    const shiftTxs = allTxs
+      .filter((t) => t.shiftId === params.shiftId && t.status !== 'PENDING_APPROVAL' && t.status !== 'REJECTED')
+      .sort((a, b) => new Date(b.timestamp || (b as any).createdAt || 0).getTime() - new Date(a.timestamp || (a as any).createdAt || 0).getTime());
     
+    const shift = db.getSnapshot().shifts.find((s) => s.id === params.shiftId);
+
     // Balance after this transaction
-    const previousBalance = shiftTxs.length > 0 ? shiftTxs[0].balanceAfter : 0;
     const isPending = params.status === 'PENDING_APPROVAL';
-    const balanceAfter = isPending ? previousBalance : previousBalance + params.amount;
+    let balanceAfter = 0;
+
+    if (params.type === 'OPENING_CASH') {
+      balanceAfter = params.amount;
+    } else if (params.type === 'SHIFT_CLOSE') {
+      balanceAfter = 0;
+    } else {
+      const previousBalance = shiftTxs.length > 0
+        ? shiftTxs[0].balanceAfter
+        : (shift?.openingCash || 0);
+      balanceAfter = isPending ? previousBalance : previousBalance + params.amount;
+    }
 
     const newTx: CashDrawerTransaction = {
       id: `ctx_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
@@ -64,7 +186,7 @@ export const cashDrawerService = {
       orderNumber: params.orderNumber,
       reason: params.reason,
       expenseCategory: params.expenseCategory,
-      timestamp: new Date().toISOString(),
+      timestamp: getSriLankaNowISO(),
       status: params.status || 'APPROVED',
     };
 
@@ -185,7 +307,7 @@ export const cashDrawerService = {
         balanceAfter,
         approvedByUserId: params.adminId,
         approvedByUserName: params.adminName,
-        approvedAt: new Date().toISOString(),
+        approvedAt: getSriLankaNowISO(),
       };
 
       approvedTx = updated;
@@ -254,7 +376,7 @@ export const cashDrawerService = {
         entityId: tx.id,
         details: `Approved ${tx.type} request of Rs. ${(Math.abs(tx.amount) / 100).toFixed(2)} for ${tx.cashierName}`,
         terminalId: tx.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);
@@ -305,7 +427,7 @@ export const cashDrawerService = {
         entityId: tx.id,
         details: `Rejected ${tx.type} request of Rs. ${(Math.abs(tx.amount) / 100).toFixed(2)} for ${tx.cashierName}${params.reason ? ` - ${params.reason}` : ''}`,
         terminalId: tx.terminalId,
-        timestamp: new Date().toISOString(),
+        timestamp: getSriLankaNowISO(),
       },
       ...logs,
     ]);

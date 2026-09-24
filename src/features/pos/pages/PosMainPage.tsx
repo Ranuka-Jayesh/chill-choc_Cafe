@@ -19,7 +19,6 @@ import { ModifierModal } from '../components/ModifierModal';
 import { CartPanel } from '../components/CartPanel';
 import { PaymentModal } from '../components/PaymentModal';
 import { CashInOutModal } from '../components/CashInOutModal';
-import { PosPrinterSettingsModal } from '../components/PosPrinterSettingsModal';
 import { OrdersHistoryDrawer } from '../components/OrdersHistoryDrawer';
 import { PosExpensesDrawer } from '../components/PosExpensesDrawer';
 import { PosStockDrawer } from '../components/PosStockDrawer';
@@ -38,7 +37,11 @@ export const PosMainPage: React.FC = () => {
   const cart = usePosCartStore();
 
   // Local state
-  const [activeShift, setActiveShift] = useState<CashierShift | null>(null);
+  const [activeShift, setActiveShift] = useState<CashierShift | null>(() => {
+    if (!session) return null;
+    return shiftService.getActiveShift(session.user.id, session.terminalId);
+  });
+  const [isDbReady, setIsDbReady] = useState(() => db.isReady());
   const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [configuringProduct, setConfiguringProduct] = useState<Product | null>(null);
@@ -49,7 +52,6 @@ export const PosMainPage: React.FC = () => {
   const [isExpensesOpen, setIsExpensesOpen] = useState(false);
   const [isAttendanceOpen, setIsAttendanceOpen] = useState(false);
   const [isStockDrawerOpen, setIsStockDrawerOpen] = useState(false);
-  const [isPrinterQueueOpen, setIsPrinterQueueOpen] = useState(false);
   const [isOrdersHistoryOpen, setIsOrdersHistoryOpen] = useState(false);
   const [isHeldOrdersOpen, setIsHeldOrdersOpen] = useState(false);
   const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
@@ -76,6 +78,7 @@ export const PosMainPage: React.FC = () => {
       setProducts(catalogService.getProducts());
       const shift = shiftService.getActiveShift(session.user.id, session.terminalId);
       setActiveShift(shift);
+      setIsDbReady(db.isReady());
     };
 
     refreshData();
@@ -125,8 +128,11 @@ export const PosMainPage: React.FC = () => {
     });
 
     const unsubShift = realtimeSocketService.on('SHIFT_CHANGED', (msg) => {
-      if (msg.payload?.shift?.cashierId === session.user.id) {
-        setActiveShift(msg.payload.shift);
+      const shift = msg.payload?.shift;
+      if (shift && shift.cashierId === session.user.id) {
+        setActiveShift(shift.status === 'OPEN' ? shift : null);
+      } else {
+        refreshData();
       }
     });
 
@@ -138,6 +144,18 @@ export const PosMainPage: React.FC = () => {
       refreshData();
     });
 
+    const handleNightlyShiftAutoClosed = () => {
+      soundService.playLogout();
+      toast.info('Nightly 11:59 PM Cutoff: Shift closed and drawer cleared. Please log in fresh.', {
+        duration: 5000,
+        id: 'nightly-auto-close-toast',
+      });
+      logout();
+      navigate('/pos/login');
+    };
+
+    window.addEventListener('nightly-shift-auto-closed', handleNightlyShiftAutoClosed);
+
     return () => {
       unsubDb();
       unsubCatalog();
@@ -145,8 +163,9 @@ export const PosMainPage: React.FC = () => {
       unsubShift();
       unsubSettings();
       unsubReceipt();
+      window.removeEventListener('nightly-shift-auto-closed', handleNightlyShiftAutoClosed);
     };
-  }, [session, navigate]);
+  }, [session, logout, navigate]);
 
   // Keyboard Shortcuts (F2 Search, F4 Pay, F5 Hold, Esc Modal / Fullscreen)
   useEffect(() => {
@@ -183,12 +202,6 @@ export const PosMainPage: React.FC = () => {
           e.preventDefault();
           e.stopPropagation();
           setIsCashInOutOpen(false);
-          return;
-        }
-        if (isPrinterQueueOpen) {
-          e.preventDefault();
-          e.stopPropagation();
-          setIsPrinterQueueOpen(false);
           return;
         }
         if (isOrdersHistoryOpen) {
@@ -243,7 +256,6 @@ export const PosMainPage: React.FC = () => {
     configuringProduct,
     isPaymentOpen,
     isCashInOutOpen,
-    isPrinterQueueOpen,
     isOrdersHistoryOpen,
     isHeldOrdersOpen,
     isMobileCartOpen,
@@ -305,7 +317,6 @@ export const PosMainPage: React.FC = () => {
         onOpenAttendance={() => setIsAttendanceOpen(true)}
         onOpenStockDrawer={() => setIsStockDrawerOpen(true)}
         onOpenCashInOut={() => setIsCashInOutOpen(true)}
-        onOpenPrinterManager={() => setIsPrinterQueueOpen(true)}
         onOpenHeldOrders={() => setIsHeldOrdersOpen(true)}
         onLogoutClick={handleLogout}
       />
@@ -489,7 +500,7 @@ export const PosMainPage: React.FC = () => {
       )}
 
       {/* 3. Mandatory Shift Opening Modal if no active shift */}
-      {(!activeShift || activeShift.status !== 'OPEN') && (
+      {isDbReady && (!activeShift || activeShift.status !== 'OPEN') && (
         <OpenShiftModal
           user={session.user}
           onShiftOpened={(sh) => setActiveShift(sh)}
@@ -526,13 +537,7 @@ export const PosMainPage: React.FC = () => {
         />
       )}
 
-      {/* 7. Comprehensive Printer Manager & Hardware Routing Modal */}
-      <PosPrinterSettingsModal
-        isOpen={isPrinterQueueOpen}
-        onClose={() => setIsPrinterQueueOpen(false)}
-      />
-
-      {/* 8. Recent Orders Slide-over Drawer */}
+      {/* 7. Recent Orders Slide-over Drawer */}
       <OrdersHistoryDrawer
         isOpen={isOrdersHistoryOpen}
         onClose={() => setIsOrdersHistoryOpen(false)}
@@ -540,6 +545,7 @@ export const PosMainPage: React.FC = () => {
         onViewKOT={(ord) => setViewingKOTOrder(ord)}
         userId={session.user.id}
         userName={session.user.name}
+        shift={activeShift}
       />
 
       {/* 9. Cashier Shift Operating Expenses Slide-over Drawer */}

@@ -22,9 +22,12 @@ export const RealtimeNotificationListener: React.FC = () => {
         const tx = msg.payload?.transaction;
         if (!tx) return;
 
-        const path = typeof window !== 'undefined' ? window.location.pathname : '';
         const session = useAuthStore.getState().session;
-        const isAdmin = path.startsWith('/admin') || session?.user?.role === 'ADMIN';
+        // Don't self-notify the cashier who made the request
+        if (tx.cashierId && tx.cashierId === session?.user?.id) return;
+
+        const path = typeof window !== 'undefined' ? window.location.pathname : '';
+        const isAdmin = path.startsWith('/admin') || (session?.user?.role === 'ADMIN' && !path.startsWith('/pos'));
 
         // Only alert Admin users
         if (isAdmin) {
@@ -60,9 +63,13 @@ export const RealtimeNotificationListener: React.FC = () => {
         const req = msg.payload?.stockRequest;
         if (!req) return;
 
-        const path = typeof window !== 'undefined' ? window.location.pathname : '';
         const session = useAuthStore.getState().session;
-        const isAdmin = path.startsWith('/admin') || session?.user?.role === 'ADMIN';
+        // Don't self-notify the user who made the request
+        if (req.requestedByUserId && req.requestedByUserId === session?.user?.id) return;
+        if (req.requestedByUserName && req.requestedByUserName === session?.user?.name) return;
+
+        const path = typeof window !== 'undefined' ? window.location.pathname : '';
+        const isAdmin = path.startsWith('/admin') || (session?.user?.role === 'ADMIN' && !path.startsWith('/pos'));
 
         // Only alert Admin users
         if (isAdmin) {

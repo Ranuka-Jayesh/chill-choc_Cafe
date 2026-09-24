@@ -258,7 +258,7 @@ export const AdminSettingsPage: React.FC = () => {
                   type="text"
                   value={settings.phone}
                   onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
-                  placeholder="+94 11 234 5678"
+                  placeholder="076 9007273 Call / WhatsApp"
                   className="w-full px-4 py-3 bg-[#FAF7F2] border border-[#E0D7CC] rounded-2xl text-xs font-bold font-mono text-brand-brown-dark focus:outline-none focus:border-brand-teal transition-colors shadow-2xs"
                 />
               </div>
@@ -292,7 +292,7 @@ export const AdminSettingsPage: React.FC = () => {
                   type="text"
                   value={settings.address}
                   onChange={(e) => setSettings({ ...settings, address: e.target.value })}
-                  placeholder="No. 42, Galle Road, Colombo 03, Sri Lanka"
+                  placeholder="No 447/1 , Debarawewa , Tissamaharama"
                   className="w-full px-4 py-3 bg-[#FAF7F2] border border-[#E0D7CC] rounded-2xl text-xs font-bold text-brand-brown-dark focus:outline-none focus:border-brand-teal transition-colors shadow-2xs"
                 />
               </div>
@@ -948,8 +948,41 @@ export const AdminSettingsPage: React.FC = () => {
         {/* TAB 4: CASH DRAWER & SHIFTS */}
         {activeTab === 'drawer' && (
           <div className="space-y-1 animate-in fade-in duration-150 flex-1 pb-28">
-            {/* Policy 1: Require Opening Cash */}
+            {/* Policy 0: Automated 11:59 PM Shift Close & Drawer Clear */}
             <div className="pb-5 flex items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="text-xs font-black text-brand-brown-dark">Automated 11:59 PM Shift Close & Drawer Clear</div>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    Active (11:59 PM Cutoff)
+                  </span>
+                </div>
+                <div className="text-[11px] text-text-secondary mt-0.5">
+                  Automatically balances and closes open cashier shifts every night at 11:59 PM, cashes out drawer to Rs. 0.00, and requires fresh login and opening float count the next morning
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() =>
+                  setSettings({
+                    ...settings,
+                    autoCloseNightlyShifts: settings.autoCloseNightlyShifts !== false ? false : true,
+                  })
+                }
+                className={`w-12 h-6.5 rounded-full transition-colors relative cursor-pointer shadow-2xs shrink-0 ${
+                  settings.autoCloseNightlyShifts !== false ? 'bg-brand-teal' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 bg-white rounded-full transition-transform shadow-xs absolute top-0.5 ${
+                    settings.autoCloseNightlyShifts !== false ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Policy 1: Require Opening Cash */}
+            <div className="py-5 border-t border-[#F2ECE4] flex items-center justify-between gap-4">
               <div>
                 <div className="text-xs font-black text-brand-brown-dark">Require Starting Float Cash</div>
                 <div className="text-[11px] text-text-secondary mt-0.5">

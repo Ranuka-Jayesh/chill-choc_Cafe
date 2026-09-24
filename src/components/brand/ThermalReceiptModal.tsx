@@ -7,7 +7,6 @@ import { formatLKR, formatDateTime } from '@/utils/format';
 import { Printer, CheckCircle2, X, Zap } from 'lucide-react';
 import { toast } from 'sonner';
 import { printThermalElement } from '@/utils/printThermal';
-import { directPrintService } from '@/services/directPrintService';
 
 interface ThermalReceiptModalProps {
   order: Order | null;
@@ -71,23 +70,14 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
 
   const [isPrinting, setIsPrinting] = useState(false);
 
-  const handlePrint = async () => {
+  const handlePrint = () => {
     if (isPrinting || !order) return;
     setIsPrinting(true);
     try {
-      if (directPrintService.isEnabled()) {
-        const res = await directPrintService.printCustomerReceipt(order, { forceReprint: true });
-        if (res.success) {
-          toast.success(`Printed directly to ${directPrintService.getSelectedPrinter()}!`, { icon: '🖨️' });
-          return;
-        }
-        toast.info(`Direct printer unavailable (${res.message || 'offline'}). Opening standard print.`);
-      }
-      // Automatic fallback to browser print dialog
       printThermalElement('printable-receipt');
-    } catch (err) {
-      console.warn('Direct print error, falling back to browser print:', err);
-      printThermalElement('printable-receipt');
+    } catch (err: any) {
+      console.warn('Print error, falling back to browser print:', err);
+      window.print();
     } finally {
       setIsPrinting(false);
     }
@@ -111,14 +101,13 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || !order || !autoPrint) return;
-    // Only auto-trigger browser iframe print if direct printing is DISABLED and autoPrint is explicitly requested
-    if (settings.autoPrintReceipt && !settings.directPrintEnabled) {
+    if (settings.autoPrintReceipt) {
       const t = setTimeout(() => {
         printThermalElement('printable-receipt');
       }, 400);
       return () => clearTimeout(t);
     }
-  }, [isOpen, order, autoPrint, settings.autoPrintReceipt, settings.directPrintEnabled]);
+  }, [isOpen, order, autoPrint, settings.autoPrintReceipt]);
 
   if (!isOpen || !order || typeof document === 'undefined') return null;
 
@@ -147,12 +136,23 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
   const displayTagline =
     custom?.tagline !== undefined ? custom.tagline : settings.tagline;
   const displayAddress =
-    custom?.address !== undefined ? custom.address : settings.address;
+    custom?.address && custom.address.trim() !== '' && !custom.address.includes('Galle Road')
+      ? custom.address
+      : settings.address && settings.address.trim() !== '' && !settings.address.includes('Galle Road')
+      ? settings.address
+      : 'No 447/1 , Debarawewa , Tissamaharama';
   const displayPhone =
-    custom?.phone !== undefined ? custom.phone : settings.phone;
+    custom?.phone && custom.phone.trim() !== '' && !custom.phone.includes('234 5678')
+      ? custom.phone
+      : settings.phone && settings.phone.trim() !== '' && !settings.phone.includes('234 5678')
+      ? settings.phone
+      : '076 9007273 Call / WhatsApp';
 
   const showLogo = custom ? custom.showLogo : true;
-  const logoUrl = custom?.logoUrl || '/logobg.webp';
+  const logoUrl =
+    custom?.logoUrl && custom.logoUrl !== '/logobg.webp' && custom.logoUrl !== '/logobg.png'
+      ? custom.logoUrl
+      : '/printlogo.jpg';
   const logoWidthPx = custom?.logoWidthPx || 95;
   const logoAlignment = custom?.logoAlignment || 'center';
   const headerAlignment = custom?.headerAlignment || 'center';
@@ -237,9 +237,7 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
           {showLogo && logoUrl && (
             <div
               style={{
-                position: 'relative',
-                top: `${-(custom?.logoOffsetYPx ?? 0)}px`,
-                paddingBottom: '10px',
+                paddingBottom: '6px',
               }}
               className={`flex transition-transform duration-150 ${logoAlignment === 'left' ? 'justify-start' : 'justify-center'}`}
             >
@@ -247,28 +245,28 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
                 src={logoUrl}
                 alt="Logo"
                 style={{ width: `${logoWidthPx}px` }}
-                className="object-contain max-h-48 h-auto"
+                className="object-contain max-h-48 h-auto block select-none"
               />
             </div>
           )}
 
           {/* Receipt Brand Header */}
-          <div className={`pb-3 ${dividerClass} ${headerAlignment === 'left' ? 'text-left' : 'text-center'}`}>
-            {displayBusinessName && displayBusinessName.trim() !== '' && (
+          <div className={`pb-2.5 ${dividerClass} ${headerAlignment === 'left' ? 'text-left' : 'text-center'}`}>
+            {(!showLogo || !logoUrl) && displayBusinessName && displayBusinessName.trim() !== '' && (
               <h2 className={`tracking-wider text-zinc-950 ${getHeading1Class()}`}>
                 {displayBusinessName.toUpperCase()}
               </h2>
             )}
-            {displayTagline && displayTagline.trim() !== '' && (
+            {(!showLogo || !logoUrl) && displayTagline && displayTagline.trim() !== '' && (
               <p className="text-[10px] text-zinc-600 uppercase font-semibold mt-0.5">
                 {displayTagline}
               </p>
             )}
             {displayAddress && displayAddress.trim() !== '' && (
-              <p className="text-[10px] text-zinc-500 mt-1">{displayAddress}</p>
+              <p className="text-[10px] text-zinc-600 mt-1">{displayAddress}</p>
             )}
             {displayPhone && displayPhone.trim() !== '' && (
-              <p className="text-[10px] text-zinc-500">Tel: {displayPhone}</p>
+              <p className="text-[10px] text-zinc-600 mt-0.5">Tel: {displayPhone}</p>
             )}
           </div>
 
@@ -462,7 +460,9 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({
           {/* Built-in Developer Credits on Bottom of Receipt */}
           <div className="mt-3.5 pt-2.5 border-t border-dashed border-zinc-900 text-center select-text thermal-dev-footer">
             <div className="text-[11px] font-mono font-black text-black uppercase tracking-wider">
-              DEVELOPED BY OGO TECHNOLOGY
+              {custom?.developerCreditText && !custom.developerCreditText.includes('DEVELOPED BY')
+                ? custom.developerCreditText
+                : 'SOFTWARE BY OGO TECHNOLOGY'}
             </div>
             <div className="text-[10px] font-mono font-bold text-black mt-0.5 tracking-tight flex items-center justify-center gap-1.5">
               <span>www.ogotechnology.net</span>

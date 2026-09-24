@@ -29,6 +29,8 @@ import {
 } from '@/types';
 import { supabase } from '../supabaseClient';
 import { realtimeSocketService } from '../realtimeSocketService';
+import { getSriLankaNowISO } from '@/utils/format';
+import { autoShiftCloseService } from '../autoShiftCloseService';
 
 export interface DatabaseSchema {
   users: User[];
@@ -64,11 +66,11 @@ export interface DatabaseSchema {
 }
 
 export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
-  businessName: '',
-  tagline: '',
-  address: '',
-  phone: '',
-  email: '',
+  businessName: 'Chill & Choc',
+  tagline: 'Cool Vibes, Sweet Bites',
+  address: 'No 447/1 , Debarawewa , Tissamaharama',
+  phone: '076 9007273 Call / WhatsApp',
+  email: 'hello@chillandchoc.lk',
   currencyCode: 'LKR',
   currencySymbol: 'Rs.',
   decimalPlaces: 2,
@@ -97,6 +99,8 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   allowCashierManualCashOut: true,
   openDrawerAfterCashSale: true,
   defaultTerminalId: '',
+  autoCloseNightlyShifts: true,
+  autoCloseNightlyTime: '23:59',
   directPrintEnabled: true,
   directPrintAgentUrl: 'http://127.0.0.1:23456',
   directPrintAuthToken: 'cafemm_secure_print_token_2026',
@@ -455,15 +459,31 @@ class DatabaseManager {
         this.db.settings = normalizeSystemSettingsFromSupabase(settingsRows[0], this.db.settings);
       }
       if (shifts) {
-        this.db.shifts = shifts;
-        this.db.activeShift = shifts.find((s: CashierShift) => s.status === 'OPEN') || null;
+        const sortedShifts = [...shifts].sort(
+          (a: any, b: any) => new Date(b.openedAt || 0).getTime() - new Date(a.openedAt || 0).getTime()
+        );
+        this.db.shifts = sortedShifts;
+        const latestShift = sortedShifts[0];
+        this.db.activeShift = latestShift && latestShift.status === 'OPEN' ? latestShift : null;
       }
-      if (drawerTransactions) this.db.drawerTransactions = drawerTransactions;
-      if (orders) this.db.orders = orders;
+      if (drawerTransactions) {
+        this.db.drawerTransactions = [...drawerTransactions].sort(
+          (a: any, b: any) => new Date(b.createdAt || b.timestamp || 0).getTime() - new Date(a.createdAt || a.timestamp || 0).getTime()
+        );
+      }
+      if (orders) {
+        this.db.orders = [...orders].sort(
+          (a: any, b: any) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+      }
       if (heldOrders) this.db.heldOrders = heldOrders;
       if (customers) this.db.customers = customers;
       if (inventoryMovements) this.db.inventoryMovements = inventoryMovements;
-      if (expenses) this.db.expenses = expenses;
+      if (expenses) {
+        this.db.expenses = [...expenses].sort(
+          (a: any, b: any) => new Date(b.createdAt || b.date || 0).getTime() - new Date(a.createdAt || a.date || 0).getTime()
+        );
+      }
       if (purchases) this.db.purchases = purchases;
       if (stockRequests) this.db.stockRequests = stockRequests;
       if (employees) this.db.employees = employees;
@@ -473,7 +493,11 @@ class DatabaseManager {
       if (loyaltyHistories) this.db.loyaltyHistories = loyaltyHistories;
       if (printers) this.db.printers = printers;
       if (printerJobs) this.db.printerJobs = printerJobs;
-      if (auditLogs) this.db.auditLogs = auditLogs;
+      if (auditLogs) {
+        this.db.auditLogs = [...auditLogs].sort(
+          (a: any, b: any) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime()
+        );
+      }
 
       if (counters && counters.length > 0) {
         const orderCounter = counters.find((c: any) => c.id === 'order_number');
@@ -485,9 +509,20 @@ class DatabaseManager {
       this.isSupabaseInitialized = true;
       this.saveDatabase(this.db, false);
       this.notifyListeners();
+
+      // Automatically evaluate any stale / overdue open shifts from previous days
+      setTimeout(() => {
+        autoShiftCloseService.checkAndAutoClose();
+      }, 0);
     } catch (err) {
       console.error('Error fetching initial data from Supabase:', err);
+      this.isSupabaseInitialized = true;
+      this.notifyListeners();
     }
+  }
+
+  public isReady(): boolean {
+    return this.isSupabaseInitialized;
   }
 
   /**
@@ -610,7 +645,44 @@ class DatabaseManager {
 
         if (toUpsert.length > 0) {
           for (let i = 0; i < toUpsert.length; i += 50) {
-            const chunk = toUpsert.slice(i, i + 50);
+            let chunk = toUpsert.slice(i, i + 50);
+
+            // Timezone protection for Supabase timestamps:
+            // Ensure orders, audit_logs, drawer_transactions, and shifts use pinned Sri Lanka ISO (+05:30)
+            if (tableName === 'orders') {
+              chunk = chunk.map((order) => {
+                const item = { ...order };
+                if (item.createdAt) item.createdAt = getSriLankaNowISO(item.createdAt);
+                if (item.completedAt) item.completedAt = getSriLankaNowISO(item.completedAt);
+                return item;
+              });
+            } else if (tableName === 'audit_logs') {
+              chunk = chunk.map((log) => {
+                const item = { ...log };
+                if (item.timestamp) item.timestamp = getSriLankaNowISO(item.timestamp);
+                return item;
+              });
+            } else if (tableName === 'drawer_transactions') {
+              chunk = chunk.map((tx) => {
+                const item = { ...tx };
+                if (item.timestamp) item.timestamp = getSriLankaNowISO(item.timestamp);
+                return item;
+              });
+            } else if (tableName === 'shifts') {
+              chunk = chunk.map((shift) => {
+                const item = { ...shift };
+                if (item.openedAt) item.openedAt = getSriLankaNowISO(item.openedAt);
+                if (item.closedAt) item.closedAt = getSriLankaNowISO(item.closedAt);
+                return item;
+              });
+            } else if (tableName === 'inventory_movements') {
+              chunk = chunk.map((mov) => {
+                const item = { ...mov };
+                if (item.timestamp) item.timestamp = getSriLankaNowISO(item.timestamp);
+                return item;
+              });
+            }
+
             const { error } = await supabase.from(tableName).upsert(chunk, { onConflict: 'id' });
             if (error) {
               console.error(`Supabase upsert error on ${tableName}:`, error);
@@ -656,7 +728,28 @@ class DatabaseManager {
         this.db = {
           ...INITIAL_DATABASE,
           ...parsed,
+          settings: {
+            ...INITIAL_DATABASE.settings,
+            ...(parsed.settings || {}),
+          },
         };
+        if (!this.db.settings.address || this.db.settings.address.includes('Galle Road')) {
+          this.db.settings.address = 'No 447/1 , Debarawewa , Tissamaharama';
+        }
+        if (!this.db.settings.phone || this.db.settings.phone.includes('234 5678')) {
+          this.db.settings.phone = '076 9007273 Call / WhatsApp';
+        }
+        if (this.db.settings.receiptCustomization) {
+          if (!this.db.settings.receiptCustomization.address || this.db.settings.receiptCustomization.address.includes('Galle Road')) {
+            this.db.settings.receiptCustomization.address = 'No 447/1 , Debarawewa , Tissamaharama';
+          }
+          if (!this.db.settings.receiptCustomization.phone || this.db.settings.receiptCustomization.phone.includes('234 5678')) {
+            this.db.settings.receiptCustomization.phone = '076 9007273 Call / WhatsApp';
+          }
+          if (!this.db.settings.receiptCustomization.developerCreditText || this.db.settings.receiptCustomization.developerCreditText.includes('DEVELOPED BY')) {
+            this.db.settings.receiptCustomization.developerCreditText = 'SOFTWARE BY OGO TECHNOLOGY';
+          }
+        }
         this.notifyListeners();
         this.isSyncingFromRemote = false;
       }
@@ -690,6 +783,25 @@ class DatabaseManager {
           ...(parsed.settings || {}),
         },
       };
+
+      // Ensure address, phone, and developer credit defaults reflect updated store details
+      if (!combined.settings.address || combined.settings.address.includes('Galle Road')) {
+        combined.settings.address = 'No 447/1 , Debarawewa , Tissamaharama';
+      }
+      if (!combined.settings.phone || combined.settings.phone.includes('234 5678')) {
+        combined.settings.phone = '076 9007273 Call / WhatsApp';
+      }
+      if (combined.settings.receiptCustomization) {
+        if (!combined.settings.receiptCustomization.address || combined.settings.receiptCustomization.address.includes('Galle Road')) {
+          combined.settings.receiptCustomization.address = 'No 447/1 , Debarawewa , Tissamaharama';
+        }
+        if (!combined.settings.receiptCustomization.phone || combined.settings.receiptCustomization.phone.includes('234 5678')) {
+          combined.settings.receiptCustomization.phone = '076 9007273 Call / WhatsApp';
+        }
+        if (!combined.settings.receiptCustomization.developerCreditText || combined.settings.receiptCustomization.developerCreditText.includes('DEVELOPED BY')) {
+          combined.settings.receiptCustomization.developerCreditText = 'SOFTWARE BY OGO TECHNOLOGY';
+        }
+      }
 
       // Automatically purge any legacy mock/placeholder dummy printers
       if (combined.printers && Array.isArray(combined.printers)) {

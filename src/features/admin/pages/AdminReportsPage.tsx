@@ -1,11 +1,13 @@
-import React, { useState, useMemo } from 'react';
-import { reportService } from '@/services/reportService';
+import React, { useState, useMemo, useEffect } from 'react';
+import { reportService, toLocalYMD } from '@/services/reportService';
 import { catalogService } from '@/services/catalogService';
 import { orderService } from '@/services/orderService';
 import { cashDrawerService } from '@/services/cashDrawerService';
 import { accountingService } from '@/services/accountingService';
+import { db } from '@/services/storage/db';
 import { formatLKR, formatDate, formatDateTime } from '@/utils/format';
-import { MonthYearPicker, MonthYearValue } from '@/components/ui/MonthYearPicker';
+import { DayDatePicker } from '@/components/ui/DayDatePicker';
+import { format } from 'date-fns';
 import {
   BarChart3,
   Printer,
@@ -55,7 +57,7 @@ import {
 } from 'recharts';
 import { toast } from 'sonner';
 
-const PAYMENT_COLORS = ['#00A896', '#E99343'];
+const PAYMENT_COLORS = ['#00A896', '#E99343', '#8B5CF6'];
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December'
@@ -64,32 +66,50 @@ const MONTH_NAMES = [
 type SubPeriod = 'TODAY' | 'THIS_WEEK' | 'LAST_WEEK' | 'MONTH';
 
 export const AdminReportsPage: React.FC = () => {
-  const now = new Date();
-  const [monthYear, setMonthYear] = useState<MonthYearValue>({
-    year: String(now.getFullYear()),
-    month: String(now.getMonth() + 1),
-  });
+  const [dbTick, setDbTick] = useState(0);
+
+  useEffect(() => {
+    const unsub = db.subscribe(() => {
+      setDbTick((prev) => prev + 1);
+    });
+    return () => {
+      unsub();
+    };
+  }, []);
+
+  const getTodayStr = () => toLocalYMD(new Date());
+
+  const [selectedDate, setSelectedDate] = useState<string>(getTodayStr);
   const [subPeriod, setSubPeriod] = useState<SubPeriod>('TODAY');
   const [hourlyMetric, setHourlyMetric] = useState<'sales' | 'orders'>('sales');
 
   // Compute startDate, endDate, and human readable label
   const { startDate, endDate, periodLabel, selectedYear, selectedMonth } = useMemo(() => {
-    const sYear = monthYear.year !== 'ALL' ? parseInt(monthYear.year, 10) : now.getFullYear();
-    const sMonth = monthYear.month !== 'ALL' ? parseInt(monthYear.month, 10) : now.getMonth() + 1;
+    const todayStr = getTodayStr();
+    let refDate = new Date();
+    if (selectedDate && selectedDate !== 'ALL') {
+      const parts = selectedDate.split('-');
+      if (parts.length === 3) {
+        refDate = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+      }
+    }
+
+    const sYear = refDate.getFullYear();
+    const sMonth = refDate.getMonth() + 1;
     const monthStr = String(sMonth).padStart(2, '0');
     const daysInMonth = new Date(sYear, sMonth, 0).getDate();
     const monthName = MONTH_NAMES[sMonth - 1] || 'August';
 
-    const isCurrentMonth = sYear === now.getFullYear() && sMonth === now.getMonth() + 1;
+    const isToday = selectedDate === todayStr;
 
     if (subPeriod === 'TODAY') {
-      const dayNum = isCurrentMonth ? now.getDate() : Math.min(26, daysInMonth);
+      const dayNum = refDate.getDate();
       const dayStr = String(dayNum).padStart(2, '0');
-      const todayDate = `${sYear}-${monthStr}-${dayStr}`;
+      const targetDate = `${sYear}-${monthStr}-${dayStr}`;
       return {
-        startDate: todayDate,
-        endDate: todayDate,
-        periodLabel: isCurrentMonth
+        startDate: targetDate,
+        endDate: targetDate,
+        periodLabel: isToday
           ? `Today (${dayNum} ${monthName.slice(0, 3)} ${sYear})`
           : `${dayNum} ${monthName.slice(0, 3)} ${sYear}`,
         selectedYear: sYear,
@@ -98,16 +118,9 @@ export const AdminReportsPage: React.FC = () => {
     }
 
     if (subPeriod === 'THIS_WEEK') {
-      let startDay = 1;
-      let endDay = Math.min(7, daysInMonth);
-      if (isCurrentMonth) {
-        const dayOfWeek = now.getDay() || 7;
-        startDay = Math.max(1, now.getDate() - dayOfWeek + 1);
-        endDay = Math.min(daysInMonth, startDay + 6);
-      } else {
-        startDay = Math.max(1, daysInMonth - 6);
-        endDay = daysInMonth;
-      }
+      const dayOfWeek = refDate.getDay() || 7;
+      const startDay = Math.max(1, refDate.getDate() - dayOfWeek + 1);
+      const endDay = Math.min(daysInMonth, startDay + 6);
       const start = `${sYear}-${monthStr}-${String(startDay).padStart(2, '0')}`;
       const end = `${sYear}-${monthStr}-${String(endDay).padStart(2, '0')}`;
       return {
@@ -120,17 +133,10 @@ export const AdminReportsPage: React.FC = () => {
     }
 
     if (subPeriod === 'LAST_WEEK') {
-      let startDay = 1;
-      let endDay = 7;
-      if (isCurrentMonth) {
-        const dayOfWeek = now.getDay() || 7;
-        const thisMon = now.getDate() - dayOfWeek + 1;
-        startDay = Math.max(1, thisMon - 7);
-        endDay = Math.min(daysInMonth, startDay + 6);
-      } else {
-        startDay = Math.max(1, daysInMonth - 13);
-        endDay = Math.max(7, daysInMonth - 7);
-      }
+      const dayOfWeek = refDate.getDay() || 7;
+      const thisMon = refDate.getDate() - dayOfWeek + 1;
+      const startDay = Math.max(1, thisMon - 7);
+      const endDay = Math.min(daysInMonth, startDay + 6);
       const start = `${sYear}-${monthStr}-${String(startDay).padStart(2, '0')}`;
       const end = `${sYear}-${monthStr}-${String(endDay).padStart(2, '0')}`;
       return {
@@ -152,30 +158,39 @@ export const AdminReportsPage: React.FC = () => {
       selectedYear: sYear,
       selectedMonth: sMonth,
     };
-  }, [monthYear, subPeriod, now.getFullYear(), now.getMonth(), now.getDate()]);
+  }, [selectedDate, subPeriod]);
 
   // Query aggregated data for this range
-  const dailyReport = reportService.getReportForDateRange(startDate, endDate);
-  const categorySales = reportService.getCategorySales();
-  const hourlyData = reportService.getHourlySalesForRange(startDate, endDate);
-  const products = catalogService.getProducts();
-  const orders = orderService.getOrders();
-  const allExpenses = catalogService.getExpenses();
+  const dailyReport = useMemo(() => {
+    return reportService.getReportForDateRange(startDate, endDate);
+  }, [startDate, endDate, dbTick]);
+
+  const categorySales = useMemo(() => {
+    return reportService.getCategorySales(startDate, endDate);
+  }, [startDate, endDate, dbTick]);
+
+  const hourlyData = useMemo(() => {
+    return reportService.getHourlySalesForRange(startDate, endDate);
+  }, [startDate, endDate, dbTick]);
+
+  const products = useMemo(() => catalogService.getProducts(), [dbTick]);
+  const orders = useMemo(() => orderService.getOrders(), [dbTick]);
+  const allExpenses = useMemo(() => catalogService.getExpenses(), [dbTick]);
 
   // Accounting & Operations Data
-  const employees = accountingService.getEmployees();
-  const allEmployeePayments = accountingService.getEmployeePayments();
-  const suppliers = accountingService.getSuppliers();
-  const allPurchases = catalogService.getPurchases();
+  const employees = useMemo(() => accountingService.getEmployees(), [dbTick]);
+  const allEmployeePayments = useMemo(() => accountingService.getEmployeePayments(), [dbTick]);
+  const suppliers = useMemo(() => accountingService.getSuppliers(), [dbTick]);
+  const allPurchases = useMemo(() => catalogService.getPurchases(), [dbTick]);
 
   const financialSummary = useMemo(() => {
-    return accountingService.getFinancialSummary(selectedYear, selectedMonth);
-  }, [selectedYear, selectedMonth]);
+    return accountingService.getFinancialSummary(selectedYear, selectedMonth, startDate, endDate);
+  }, [selectedYear, selectedMonth, startDate, endDate, dbTick]);
 
   // Filter expenses for this range
   const dayExpenses = useMemo(() => {
     return allExpenses.filter((e) => {
-      const d = e.createdAt.split('T')[0];
+      const d = toLocalYMD(e.createdAt);
       return d >= startDate && d <= endDate;
     });
   }, [allExpenses, startDate, endDate]);
@@ -187,7 +202,7 @@ export const AdminReportsPage: React.FC = () => {
   // 1. Employee Payments Statistics for Selected Range
   const employeeStats = useMemo(() => {
     const rangePayments = allEmployeePayments.filter((p) => {
-      const d = (p.date || p.createdAt || '').split('T')[0];
+      const d = toLocalYMD(p.date || p.createdAt);
       return d >= startDate && d <= endDate;
     });
 
@@ -245,7 +260,7 @@ export const AdminReportsPage: React.FC = () => {
   // 2. Suppliers Statistics for Selected Range
   const supplierStats = useMemo(() => {
     const rangePurchases = allPurchases.filter((p) => {
-      const d = (p.purchaseDate || '').split('T')[0];
+      const d = toLocalYMD(p.purchaseDate);
       return d >= startDate && d <= endDate;
     });
 
@@ -290,7 +305,7 @@ export const AdminReportsPage: React.FC = () => {
   // 3. Supply Products & Procurement Statistics (Raw Materials & Stock Items)
   const supplyProductStats = useMemo(() => {
     const rangePurchases = allPurchases.filter((p) => {
-      const d = (p.purchaseDate || '').split('T')[0];
+      const d = toLocalYMD(p.purchaseDate);
       return d >= startDate && d <= endDate;
     });
 
@@ -364,7 +379,7 @@ export const AdminReportsPage: React.FC = () => {
 
     orders.forEach((ord) => {
       if (ord.status === 'CANCELLED') return;
-      const orderDate = ord.createdAt.split('T')[0];
+      const orderDate = toLocalYMD(ord.createdAt);
       if (orderDate < startDate || orderDate > endDate) return;
 
       ord.items.forEach((it) => {
@@ -398,12 +413,13 @@ export const AdminReportsPage: React.FC = () => {
 
   const topProduct = productSalesList.length > 0 ? productSalesList[0] : null;
 
-  // Tender breakdown data for Pie Chart (Cash & Card)
+  // Tender breakdown data for Pie Chart (Cash, Card, QR)
   const tenderChartData = useMemo(() => {
-    const total = dailyReport.netSalesCents || 1;
+    const totalTender = (dailyReport.cashSalesCents + dailyReport.cardSalesCents + dailyReport.qrSalesCents) || 1;
     return [
-      { name: 'Cash', value: dailyReport.cashSalesCents, percent: Math.round((dailyReport.cashSalesCents / total) * 100) },
-      { name: 'Card', value: dailyReport.cardSalesCents, percent: Math.round((dailyReport.cardSalesCents / total) * 100) },
+      { name: 'Cash', value: dailyReport.cashSalesCents, percent: Math.round((dailyReport.cashSalesCents / totalTender) * 100) },
+      { name: 'Card', value: dailyReport.cardSalesCents, percent: Math.round((dailyReport.cardSalesCents / totalTender) * 100) },
+      { name: 'QR', value: dailyReport.qrSalesCents, percent: Math.round((dailyReport.qrSalesCents / totalTender) * 100) },
     ].filter((t) => t.value > 0);
   }, [dailyReport]);
 
@@ -441,12 +457,12 @@ export const AdminReportsPage: React.FC = () => {
 
         {/* Action Controls: Month Capsule & Sub-period Pill Strip */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-start md:justify-end">
-          {/* A. Month / Year Dark Capsule Navigator (Image 2 style) */}
-          <MonthYearPicker
-            value={monthYear}
+          {/* A. Day Date Picker Navigator */}
+          <DayDatePicker
+            value={selectedDate}
             onChange={(val) => {
-              setMonthYear(val);
-              setSubPeriod('MONTH');
+              setSelectedDate(val);
+              setSubPeriod('TODAY');
             }}
           />
 
@@ -454,7 +470,10 @@ export const AdminReportsPage: React.FC = () => {
           <div className="flex items-center gap-1 bg-[#FAF7F2] p-1 rounded-full border border-[#E0D7CC] shadow-xs">
             <button
               type="button"
-              onClick={() => setSubPeriod('TODAY')}
+              onClick={() => {
+                setSelectedDate(getTodayStr());
+                setSubPeriod('TODAY');
+              }}
               className={`px-3 py-1 text-xs font-black rounded-full transition-all cursor-pointer ${
                 subPeriod === 'TODAY'
                   ? 'bg-[#251814] text-white shadow-xs'
@@ -573,7 +592,7 @@ export const AdminReportsPage: React.FC = () => {
         <div className="bg-white p-4 sm:p-5 rounded-2xl border border-[#E9E0D5] shadow-xs flex flex-col justify-between">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-black uppercase tracking-wider text-text-muted">
-              Drawer Balance & Status
+              Shift Cashouts & Audit
             </span>
             <div className="w-8 h-8 rounded-xl bg-cream-100 text-brand-brown flex items-center justify-center border border-[#E0D7CC]">
               <Coins className="w-4 h-4" />
@@ -586,7 +605,11 @@ export const AdminReportsPage: React.FC = () => {
             <div className="flex items-center gap-1.5 text-[11px] font-bold mt-1">
               {dailyReport.varianceCents === 0 ? (
                 <span className="text-brand-teal flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Balanced Register
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>
+                    Balanced Register
+                    {dailyReport.closedAuditedCount > 0 && ` (${dailyReport.closedAuditedCount} closed)`}
+                  </span>
                 </span>
               ) : dailyReport.varianceCents > 0 ? (
                 <span className="text-emerald-700">+{formatLKR(dailyReport.varianceCents)} (Over)</span>
@@ -766,7 +789,7 @@ export const AdminReportsPage: React.FC = () => {
           </div>
 
           {/* Custom Tender Legend Strip */}
-          <div className="grid grid-cols-2 gap-2 pt-2 border-t border-[#EAE3DA]">
+          <div className={`grid ${dailyReport.qrSalesCents > 0 ? 'grid-cols-3' : 'grid-cols-2'} gap-2 pt-2 border-t border-[#EAE3DA]`}>
             <div className="p-2 bg-cream-50 rounded-xl border border-[#E0D7CC] text-center">
               <span className="text-[10px] font-bold text-text-secondary block">Cash Tendered</span>
               <span className="text-xs font-black text-brand-brown-dark tabular-nums">
@@ -779,6 +802,14 @@ export const AdminReportsPage: React.FC = () => {
                 {formatLKR(dailyReport.cardSalesCents)}
               </span>
             </div>
+            {dailyReport.qrSalesCents > 0 && (
+              <div className="p-2 bg-cream-50 rounded-xl border border-[#E0D7CC] text-center">
+                <span className="text-[10px] font-bold text-text-secondary block">QR / Online</span>
+                <span className="text-xs font-black text-brand-brown-dark tabular-nums">
+                  {formatLKR(dailyReport.qrSalesCents)}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1777,8 +1808,8 @@ export const AdminReportsPage: React.FC = () => {
                   </div>
                 </div>
                 <div style={{ fontSize: '8.5px', color: '#555', lineHeight: '1.35' }}>
-                  No. 42, Galle Road, Colombo 03, Sri Lanka<br />
-                  <strong>Tel:</strong> +94 11 234 5678 &bull; <strong>Email:</strong> hello@chillandchoc.lk &bull; <strong>Web:</strong> www.chillandchoc.lk<br />
+                  No 447/1 , Debarawewa , Tissamaharama<br />
+                  <strong>Tel:</strong> 076 9007273 Call / WhatsApp &bull; <strong>Email:</strong> hello@chillandchoc.lk &bull; <strong>Web:</strong> www.chillandchoc.lk<br />
                   <strong>Tax Registration (VAT):</strong> VAT-LK-10928374
                 </div>
               </div>
@@ -2149,7 +2180,7 @@ export const AdminReportsPage: React.FC = () => {
             }}
           >
             <div>
-              <span style={{ fontWeight: '800', color: '#392A25' }}>CHILL & CHOC CAFÉ</span> &bull; No. 42, Galle Road, Colombo 03, Sri Lanka &bull; +94 11 234 5678 &bull; www.chillandchoc.lk
+              <span style={{ fontWeight: '800', color: '#392A25' }}>CHILL & CHOC CAFÉ</span> &bull; No 447/1 , Debarawewa , Tissamaharama &bull; 076 9007273 Call / WhatsApp &bull; www.chillandchoc.lk
             </div>
             <div style={{ textAlign: 'right' }}>
               <span>System Powered & Developed by </span>

@@ -13,6 +13,8 @@ import {
 import { catalogService } from './catalogService';
 import { orderService } from './orderService';
 import { realtimeSocketService } from './realtimeSocketService';
+import { toLocalYMD } from './reportService';
+
 export const accountingService = {
   getSystemSettings: (): SystemSettings | undefined => {
     return db.getSnapshot().settings;
@@ -666,34 +668,50 @@ export const accountingService = {
   // ---------------------------------------------------------------------------
   // Financial Statement & P&L Calculation
   // ---------------------------------------------------------------------------
-  getFinancialSummary: (year: number, month: number) => {
-    // Month is 1-indexed (1 to 12)
+  getFinancialSummary: (
+    year: number,
+    month: number,
+    startDateStr?: string,
+    endDateStr?: string
+  ) => {
+    // If startDateStr and endDateStr are provided, filter strictly to that local range.
+    // Otherwise filter to the given calendar month (1-indexed).
     const isMatchingDate = (dateStr?: string) => {
       if (!dateStr) return false;
-      const d = new Date(dateStr);
-      return d.getFullYear() === year && d.getMonth() + 1 === month;
+      const localDate = toLocalYMD(dateStr);
+      if (!localDate) return false;
+      if (startDateStr && endDateStr) {
+        return localDate >= startDateStr && localDate <= endDateStr;
+      }
+      const [yStr, mStr] = localDate.split('-');
+      return parseInt(yStr, 10) === year && parseInt(mStr, 10) === month;
     };
 
-    // 1. Gross Revenue from completed Orders
+    // 1. Gross Revenue from completed Orders (less refunds)
     const allOrders = orderService.getOrders();
-    const monthlyOrders = allOrders.filter(
+    const rangeOrders = allOrders.filter(
       (o) => o.status !== 'CANCELLED' && isMatchingDate(o.createdAt)
     );
-    const grossRevenueCents = monthlyOrders.reduce((sum, o) => sum + (o.totalCents || 0), 0);
-    const orderCount = monthlyOrders.length;
+    const grossRevenueCents = rangeOrders.reduce((sum, o) => sum + (o.subtotalCents ?? o.totalCents ?? 0), 0);
+    const totalDiscountsCents = rangeOrders.reduce((sum, o) => sum + (o.discountCents || 0), 0);
+    const totalRefundsCents = rangeOrders
+      .filter((o) => o.status === 'REFUNDED' || o.status === 'PARTIALLY_REFUNDED')
+      .reduce((sum, o) => sum + (o.refundedAmountCents || o.totalCents || 0), 0);
+    const netRevenueCents = Math.max(0, grossRevenueCents - totalDiscountsCents - totalRefundsCents);
+    const completedOrders = rangeOrders.filter((o) => o.status === 'COMPLETED');
+    const orderCount = completedOrders.length;
 
     // 2. Cost of Goods & Purchases Payments (Accrual COGS + Cash Outflow by Payment Date)
     const allPurchases = catalogService.getPurchases();
-    const monthlyInvoicedPurchases = allPurchases.filter((p) => isMatchingDate(p.purchaseDate));
-    const cogsPurchasesCents = monthlyInvoicedPurchases.reduce((sum, p) => sum + (p.totalCents || 0), 0);
+    const periodInvoicedPurchases = allPurchases.filter((p) => isMatchingDate(p.purchaseDate));
+    const cogsPurchasesCents = periodInvoicedPurchases.reduce((sum, p) => sum + (p.totalCents || 0), 0);
 
-    // Payments ACTUALLY made & cleared towards purchases during THIS specific month (regardless of when PO was created)
+    // Payments ACTUALLY made & cleared towards purchases during THIS specific period
     let purchasesPaidCents = 0;
     let cashOutPurchasesCents = 0;
 
     allPurchases.forEach((p) => {
       (p.payments || []).forEach((pm) => {
-        // Cheques only count towards bank cash outflow once CLEARED by supplier/bank
         const isCleared = pm.method !== 'CHEQUE' || pm.chequeStatus === 'CLEARED';
         if (isCleared) {
           const dateToCheck = pm.clearedAt || pm.timestamp;
@@ -707,12 +725,16 @@ export const accountingService = {
       });
     });
 
-    // Outstanding dues on all purchases created on or before this month that remain unpaid
+    // Outstanding dues on all purchases created on or before this period that remain unpaid
     const purchasesDueCents = allPurchases
       .filter((p) => {
-        const pDate = new Date(p.purchaseDate);
-        const pYear = pDate.getFullYear();
-        const pMonth = pDate.getMonth() + 1;
+        const pDate = toLocalYMD(p.purchaseDate);
+        if (endDateStr) {
+          return pDate <= endDateStr;
+        }
+        const pDateObj = new Date(p.purchaseDate);
+        const pYear = pDateObj.getFullYear();
+        const pMonth = pDateObj.getMonth() + 1;
         return pYear < year || (pYear === year && pMonth <= month);
       })
       .reduce(
@@ -722,29 +744,40 @@ export const accountingService = {
 
     // 3. Employee Payroll & Disbursements
     const allPayroll = accountingService.getEmployeePayments();
-    const monthlyPayroll = allPayroll.filter((p) => isMatchingDate(p.date));
-    const payrollDisbursedCents = monthlyPayroll.reduce((sum, p) => sum + (p.amountCents || 0), 0);
+    const periodPayroll = allPayroll.filter((p) => isMatchingDate(p.date || p.createdAt));
+    const payrollDisbursedCents = periodPayroll.reduce((sum, p) => sum + (p.amountCents || 0), 0);
 
     // 4. Operating Expenses
     const allExpenses = catalogService.getExpenses();
-    const monthlyExpenses = allExpenses.filter((e) => isMatchingDate(e.createdAt));
-    const operatingExpensesCents = monthlyExpenses.reduce((sum, e) => sum + (e.amountCents || 0), 0);
+    const periodExpenses = allExpenses.filter((e) => isMatchingDate(e.createdAt));
+    const operatingExpensesCents = periodExpenses.reduce((sum, e) => sum + (e.amountCents || 0), 0);
 
     // 5. Net Profit & Margins
     const totalOutflowCents = purchasesPaidCents + payrollDisbursedCents + operatingExpensesCents;
-    const netProfitCents = grossRevenueCents - totalOutflowCents;
+    const netProfitCents = netRevenueCents - totalOutflowCents;
     const netMarginPercent = grossRevenueCents > 0 ? (netProfitCents / grossRevenueCents) * 100 : 0;
 
     // 6. Cash Flow Breakdown (Cash In vs Cash Out)
-    const cashInOrdersCents = monthlyOrders
-      .filter((o) => o.paymentMethod === 'CASH')
-      .reduce((sum, o) => sum + (o.totalCents || 0), 0);
+    let cashInOrdersCents = 0;
+    rangeOrders.forEach((o) => {
+      let orderCash = 0;
+      if (o.paymentMethod === 'CASH') {
+        orderCash = o.totalCents || 0;
+      } else if (o.paymentMethod === 'SPLIT' && o.paymentSplits) {
+        orderCash = o.paymentSplits.filter((s) => s.method === 'CASH').reduce((acc, s) => acc + s.amountCents, 0);
+      }
+      if (o.status === 'REFUNDED' || o.status === 'PARTIALLY_REFUNDED') {
+        const ref = o.refundedAmountCents || o.totalCents;
+        orderCash = Math.max(0, orderCash - ref);
+      }
+      cashInOrdersCents += orderCash;
+    });
 
-    const cashOutPayrollCents = monthlyPayroll
+    const cashOutPayrollCents = periodPayroll
       .filter((p) => p.method === 'CASH')
       .reduce((sum, p) => sum + (p.amountCents || 0), 0);
 
-    const cashOutExpensesCents = monthlyExpenses
+    const cashOutExpensesCents = periodExpenses
       .filter((e) => e.paidViaDrawer)
       .reduce((sum, e) => sum + (e.amountCents || 0), 0);
 

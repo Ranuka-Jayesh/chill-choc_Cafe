@@ -236,7 +236,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       // Play automated order success audio
       soundService.playOrderSuccess();
 
-      toast.success(`Order ${order.orderNumber} completed! Kitchen ticket printed.`);
+      toast.success(`Order ${order.orderNumber} completed!`);
       clearCart();
       onOrderSuccess(order);
       onClose();
